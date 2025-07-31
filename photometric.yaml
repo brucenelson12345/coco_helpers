@@ -1,0 +1,31 @@
+# config_photometric.yaml
+paths:
+  original_images_dir: "data/images"
+  original_annotation_file: "data/annotations.json"
+  output_images_dir: "data/photometric_augmented_images"
+  output_annotation_file: "data/photometric_augmented_annotations.json"
+
+augmentation:
+  num_augmented_copies: 2
+  brightness_limit: [0.1, 0.3]         # relative change
+  contrast_limit: [0.1, 0.3]
+  hue_shift_limit: 20
+  sat_shift_limit: 30
+  val_shift_limit: 20
+  color_jitter: [0.2, 0.2, 0.2, 0.1]  # [brightness, contrast, saturation, hue]
+  apply_color_jitter: True
+  apply_brightness_contrast: True
+  apply_hsv: True
+  gaussian_noise:
+    enabled: True
+    var_limit: [10.0, 50.0]
+  blur:
+    enabled: True
+    blur_limit: 3
+  motion_blur:
+    enabled: True
+    blur_limit: 5
+  iso_noise:
+    enabled: True
+    color_shift: [0.01, 0.05]
+    intensity: [0.1, 0.5]
