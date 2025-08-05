@@ -1,18 +1,49 @@
 import os
 import json
+import yaml
 import random
+import shutil
 from collections import defaultdict, Counter
 from typing import List, Dict, Set
 
-# === CONFIG ===
-image_dir = "path/to/your/images"           # Update this
-coco_json_path = "path/to/annotations.json" # Update this
-output_dir = "output_splits"                # Update this
+def load_config(config_path: str) -> Dict[str, str]:
+    """Load configuration from YAML file."""
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+    
+    required_keys = ['image_dir', 'coco_json_path', 'output_dir']
+    for key in required_keys:
+        if key not in config:
+            raise ValueError(f"Missing required config key: {key}")
+        if not config[key]:
+            raise ValueError(f"Config key '{key}' is empty or not set.")
+        config[key] = os.path.expanduser(config[key])  # Support ~
+    
+    return config
+
+# === Load Config from YAML ===
+# Update this path to your config file
+CONFIG_FILE = "config.yaml"  # Change this if needed
+
+config = load_config(CONFIG_FILE)
+
+image_dir = config['image_dir']
+coco_json_path = config['coco_json_path']
+output_dir = config['output_dir']
+
+# Validate paths
+if not os.path.isdir(image_dir):
+    raise FileNotFoundError(f"Image directory not found: {image_dir}")
+
+if not os.path.isfile(coco_json_path):
+    raise FileNotFoundError(f"COCO JSON file not found: {coco_json_path}")
 
 os.makedirs(output_dir, exist_ok=True)
+print(f"Using config:\nImage Dir: {image_dir}\nCOCO JSON: {coco_json_path}\nOutput Dir: {output_dir}\n")
+
 random.seed(42)  # For reproducibility
 
-# Load COCO data
+# === Load COCO Data ===
 with open(coco_json_path, 'r') as f:
     coco_data = json.load(f)
 
@@ -53,11 +84,9 @@ image_groups = list(base_to_images.values())
 print(f"Total image groups (each base + aug): {len(image_groups)}")
 
 # === Step 2: Map each image group to its categories ===
-# We want: category -> list of image groups that have at least one annotation in that category
-cat_to_groups = defaultdict(set)  # cat_id -> set of group ids (index in image_groups)
+cat_to_groups = defaultdict(set)  # cat_id -> set of group indices
 group_to_cats = defaultdict(set)  # group index -> set of cat_ids
 
-# Also track group index to actual group
 group_index_to_group = {i: group for i, group in enumerate(image_groups)}
 
 for idx, group in enumerate(image_groups):
@@ -70,20 +99,12 @@ for idx, group in enumerate(image_groups):
             cat_to_groups[cat_id].add(idx)
     group_to_cats[idx] = cats_in_group
 
-# === Step 3: Stratified assignment using greedy balancing ===
-# We'll assign each group to train/val/test such that per-category counts are as close to 70/20/10 as possible
-
+# === Step 3: Stratified assignment using greedy cost minimization ===
 train_groups = set()
 val_groups = set()
 test_groups = set()
-
-# Final assignment: group index -> split
 assignment = {}
 
-# Sort categories by number of groups (smallest first to prioritize rare classes)
-sorted_cats = sorted(cat_to_groups.keys(), key=lambda c: len(cat_to_groups[c]))
-
-# Initialize counts per category per split
 cat_counts = {
     'train': Counter(),
     'val': Counter(),
@@ -92,8 +113,7 @@ cat_counts = {
 
 total_cat_counts = {cat: len(groups) for cat, groups in cat_to_groups.items()}
 
-# Function to compute imbalance if we assign group `idx` to `split`
-def compute_imbalance_loss(idx, split):
+def compute_imbalance_loss(idx: int, split: str) -> float:
     loss = 0.0
     target_ratios = {'train': 0.7, 'val': 0.2, 'test': 0.1}
     current = cat_counts[split]
@@ -102,32 +122,27 @@ def compute_imbalance_loss(idx, split):
         current_count = current[cat_id]
         new_count = current_count + 1
         target = target_ratios[split] * total
-        # Squared error before and after
         error_before = (current_count - target) ** 2
         error_after = (new_count - target) ** 2
-        loss += error_after - error_before  # Change in error
+        loss += (error_after - error_before)
     return loss
 
-# Greedy assignment: sort groups randomly and assign to least "costly" split
+# Shuffle group indices
 group_indices = list(range(len(image_groups)))
 random.shuffle(group_indices)
 
 for idx in group_indices:
     cats = group_to_cats[idx]
     if not cats:
-        # No annotations, assign to train
         assignment[idx] = 'train'
         train_groups.add(idx)
+        cat_counts['train'].update(cats)
         continue
 
-    # Compute cost for each split
-    costs = {}
-    for split in ['train', 'val', 'test']:
-        costs[split] = compute_imbalance_loss(idx, split)
-
-    # Choose split with minimum cost
+    costs = {split: compute_imbalance_loss(idx, split) for split in ['train', 'val', 'test']}
     chosen_split = min(costs, key=costs.get)
     assignment[idx] = chosen_split
+
     if chosen_split == 'train':
         train_groups.add(idx)
     elif chosen_split == 'val':
@@ -135,42 +150,30 @@ for idx in group_indices:
     else:
         test_groups.add(idx)
 
-    # Update counts
     for cat_id in cats:
         cat_counts[chosen_split][cat_id] += 1
 
-# === Step 4: Ensure at least one of each category in each split ===
-all_cats = set(cat_id_to_name.keys())
-
+# === Step 4: Ensure all categories in all splits ===
 def get_cats_in_splits():
-    train_cats = set()
-    val_cats = set()
-    test_cats = set()
-    for idx in train_groups:
-        train_cats.update(group_to_cats[idx])
-    for idx in val_groups:
-        val_cats.update(group_to_cats[idx])
-    for idx in test_groups:
-        test_cats.update(group_to_cats[idx])
-    return train_cats, val_cats, test_cats
+    return (
+        set().union(*(group_to_cats[i] for i in train_groups)),
+        set().union(*(group_to_cats[i] for i in val_groups)),
+        set().union(*(group_to_cats[i] for i in test_groups))
+    )
 
 train_cats, val_cats, test_cats = get_cats_in_splits()
+all_cats = set(cat_id_to_name.keys())
 missing_cats = all_cats - (train_cats & val_cats & test_cats)
 
 if missing_cats:
-    print(f"Ensuring all categories are in all splits. Missing: {missing_cats}")
-    # For each missing category, find a group that has it and move it
+    print(f"🔧 Ensuring all categories are in all splits. Missing: {missing_cats}")
     for cat_id in missing_cats:
-        candidate_groups = sorted(cat_to_groups[cat_id], key=lambda idx: sum(len(image_id_to_anns[img['id']]) for img in image_groups[idx]))
-        for idx in candidate_groups:
+        candidates = sorted(cat_to_groups[cat_id], key=lambda i: len(image_groups[i]))
+        for idx in candidates:
             if idx in train_groups or idx in val_groups or idx in test_groups:
-                continue  # Already assigned? Shouldn't happen
-            # Assign to the split that has the fewest total images (to balance)
-            sizes = [
-                (len(test_groups), 'test'),
-                (len(val_groups), 'val'),
-                (len(train_groups), 'train')
-            ]
+                continue
+            # Assign to smallest split
+            sizes = [(len(test_groups), 'test'), (len(val_groups), 'val'), (len(train_groups), 'train')]
             target = min(sizes)[1]
             assignment[idx] = target
             if target == 'train':
@@ -179,31 +182,26 @@ if missing_cats:
                 val_groups.add(idx)
             else:
                 test_groups.add(idx)
-            # Update counts
             for c in group_to_cats[idx]:
                 cat_counts[target][c] += 1
             break
 
-# === Step 5: Extract images for each split ===
-def get_images_from_group_indices(indices):
-    imgs = []
-    for idx in indices:
-        imgs.extend(image_groups[idx])
-    return imgs
+# === Step 5: Extract images ===
+def get_images_from_indices(indices):
+    return [img for idx in indices for img in image_groups[idx]]
 
-train_imgs = get_images_from_group_indices(train_groups)
-val_imgs = get_images_from_group_indices(val_groups)
-test_imgs = get_images_from_group_indices(test_groups)
+train_imgs = get_images_from_indices(train_groups)
+val_imgs = get_images_from_indices(val_groups)
+test_imgs = get_images_from_indices(test_groups)
 
-# === Step 6: Remap IDs and save COCO JSONs ===
-def remap_coco_json(images: List[Dict], annotations: List[Dict], image_id_to_anns: Dict) -> Dict:
+# === Step 6: Remap and Save COCO JSONs ===
+def remap_coco_json(images: List[Dict], image_id_to_anns: Dict) -> Dict:
     new_images = []
     new_annotations = []
-    img_id_map = {}
     ann_id_counter = 0
 
-    # Sort by original ID for determinism
     sorted_imgs = sorted(images, key=lambda x: x['id'])
+    img_id_map = {}
 
     for new_id, img in enumerate(sorted_imgs):
         old_id = img['id']
@@ -228,19 +226,18 @@ def remap_coco_json(images: List[Dict], annotations: List[Dict], image_id_to_ann
         'categories': categories
     }
 
-train_coco = remap_coco_json(train_imgs, annotations, image_id_to_anns)
-val_coco = remap_coco_json(val_imgs, annotations, image_id_to_anns)
-test_coco = remap_coco_json(test_imgs, annotations, image_id_to_anns)
+train_coco = remap_coco_json(train_imgs, image_id_to_anns)
+val_coco = remap_coco_json(val_imgs, image_id_to_anns)
+test_coco = remap_coco_json(test_imgs, image_id_to_anns)
 
 # Save JSONs
-with open(os.path.join(output_dir, 'train.json'), 'w') as f:
-    json.dump(train_coco, f, indent=2)
-with open(os.path.join(output_dir, 'val.json'), 'w') as f:
-    json.dump(val_coco, f, indent=2)
-with open(os.path.join(output_dir, 'test.json'), 'w') as f:
-    json.dump(test_coco, f, indent=2)
+for name, coco in [('train', train_coco), ('val', val_coco), ('test', test_coco)]:
+    path = os.path.join(output_dir, f'{name}.json')
+    with open(path, 'w') as f:
+        json.dump(coco, f, indent=2)
+    print(f"Saved {name}.json with {len(coco['images'])} images and {len(coco['annotations'])} annotations")
 
-# Optional: Copy images
+# === Step 7: Copy images (optional) ===
 for split_name, img_list in [('train', train_imgs), ('val', val_imgs), ('test', test_imgs)]:
     split_img_dir = os.path.join(output_dir, split_name, 'images')
     os.makedirs(split_img_dir, exist_ok=True)
@@ -250,18 +247,20 @@ for split_name, img_list in [('train', train_imgs), ('val', val_imgs), ('test', 
         if os.path.exists(src):
             shutil.copy2(src, dst)
         else:
-            print(f"Warning: {src} not found")
+            print(f"⚠️ Warning: Source image not found: {src}")
 
-# === Step 7: Print statistics ===
-print("\n✅ Split completed:")
+# === Step 8: Print Summary ===
+print("\n✅ Final Split Summary:")
 print(f"Train: {len(train_imgs)} images ({len(train_groups)} groups)")
 print(f"Val:   {len(val_imgs)} images ({len(val_groups)} groups)")
 print(f"Test:  {len(test_imgs)} images ({len(test_groups)} groups)")
 
-print("\n📊 Category Distribution (per split):")
-for cat_id, cat_name in cat_id_to_name.items():
+print("\n📊 Category Distribution per Split:")
+print(f"{'Class':<15} {'Train':<8} {'Val':<6} {'Test':<6} {'Total':<6}")
+print("-" * 45)
+for cat_id, cat_name in sorted(cat_id_to_name.items()):
     tr = cat_counts['train'][cat_id]
     va = cat_counts['val'][cat_id]
     te = cat_counts['test'][cat_id]
     total = tr + va + te
-    print(f"{cat_name} ({cat_id}): {tr:3d} train ({tr/total:.1%}), {va:2d} val ({va/total:.1%}), {te:2d} test ({te/total:.1%})")
+    print(f"{cat_name:<15} {tr:<8} {va:<6} {te:<6} {total:<6}")
