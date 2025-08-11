@@ -1,0 +1,4 @@
+# config_splitter.yaml
+image_dir: ./data/images
+coco_json_path: ./data/annotations.json
+output_dir: ./data/splits

@@ -1,27 +1,27 @@
-# config.yaml
-paths:
-  original_images_dir: "data/images"
-  original_annotation_file: "data/annotations.json"
-  output_images_dir: "data/geometric_augmented_images"
-  output_annotation_file: "data/geometric_augmented_annotations.json"
+# config_photometric.yaml
+INPUT:
+  images_dir: "images"
+  annotations_file: "annotations.json"
 
-augmentation:
-  num_copies_per_transform: 1  # applies each of the 7 transforms once
-  transforms:
-    - name: "rot90"
-      action: ["rotate", 90]
-    - name: "rot180"
-      action: ["rotate", 180]
-    - name: "rot270"
-      action: ["rotate", 270]
-    - name: "hflip"
-      action: ["horizontal_flip"]
-    - name: "vflip"
-      action: ["vertical_flip"]
-    - name: "hflip_rot90"
-      action: ["horizontal_flip", "rotate_90"]
-    - name: "vflip_rot180"
-      action: ["vertical_flip", "rotate_180"]
+OUTPUT:
+  output_images_dir: "images_aug"
+  output_annotations_file: "annotations_aug.json"
 
-# Optional: border mode for rotation
-border_mode: "constant"  # or "replicate", "reflect"
+AUGMENTATIONS:
+  rotations: [90, 180, 270]  # in degrees
+  horizontal_flip: true
+  vertical_flip: true
+  rotate90_plus_vertical_flip: true
+  rotate90_plus_horizontal_flip: true
+  rotate90_plus_hv_flip: true
+
+# Optional: whether to keep original as _orig
+save_original: true
+
+# Supported image extensions
+image_extensions:
+  - ".png"
+  - ".jpg"
+  - ".jpeg"
+  - ".bmp"
+  - ".tiff"
