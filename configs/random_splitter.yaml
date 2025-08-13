@@ -1,0 +1,9 @@
+images_dir: /path/to/your/images
+annotations_file: /path/to/annotations.json
+output_dir: /path/to/output_split
+
+# Optional (defaults shown)
+train_ratio: 0.7
+val_ratio: 0.2
+test_ratio: 0.1
+seed: 42

@@ -1,0 +1,27 @@
+INPUT:
+  images_dir: "images"
+  annotations_file: "annotations.json"
+
+OUTPUT:
+  output_images_dir: "images_aug"
+  output_annotations_file: "annotations_aug.json"
+
+# Optional settings (all have defaults)
+rotations: [90, 180, 270]
+horizontal_flip: true
+vertical_flip: true
+rotate90_plus_vertical_flip: true
+rotate90_plus_horizontal_flip: true
+rotate90_plus_hv_flip: true
+save_original: true
+image_extensions:
+  - ".png"
+
+# Alternatively, group under AUGMENTATIONS (also supported)
+AUGMENTATIONS:
+  horizontal_flip: true
+  vertical_flip: true
+  rotate90_plus_vertical_flip: true
+  rotate90_plus_horizontal_flip: true
+  rotate90_plus_hv_flip: true
+  rotations: [90, 180, 270]

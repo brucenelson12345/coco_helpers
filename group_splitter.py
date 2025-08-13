@@ -1,37 +1,37 @@
 #!/usr/bin/env python3
+"""
+Core class for splitting COCO datasets with grouped augmentation handling.
+"""
+
+import argparse
 import os
+import sys
 import json
-import yaml
 import random
 import shutil
+import yaml
 from collections import defaultdict, Counter
-from typing import Dict, List, Set
 
 
-class CocoDatasetSplitter:
+class CocoGroupDatasetSplitter:
     """
-    Splits a COCO dataset into train, validation, and test sets while preserving image groups
-    (e.g., original images and their augmentations) in the same split.
-
-    Ensures:
-      - Each group of images (sharing the same base name before the last '_') is kept together.
-      - Every category appears in train, val, and test splits.
-      - Final split ratios are as close as possible to 70% train, 20% val, 10% test.
+    Splits a COCO dataset into train, val, and test sets while ensuring:
+      - Images with the same base name (e.g., test_a_*.png) are kept together.
+      - Each category appears in all three splits.
+      - Final split ratios are close to 70% train, 20% val, 10% test.
     """
 
-    def __init__(self, config_path: str):
+    def __init__(self, image_dir: str, coco_json_path: str, output_dir: str):
         """
-        Initialize the splitter using a YAML configuration file.
+        Initialize the splitter with required paths.
 
-        :param config_path: Path to a YAML file containing:
-                            - image_dir: directory containing all images
-                            - coco_json_path: path to the COCO annotations JSON file
-                            - output_dir: directory where split JSONs and images will be saved
+        :param image_dir: Directory containing all images (original + augmentations).
+        :param coco_json_path: Path to the COCO annotations JSON file.
+        :param output_dir: Directory where split JSONs and images will be saved.
         """
-        self.config = self._load_config(config_path)
-        self.image_dir = self.config['image_dir']
-        self.coco_json_path = self.config['coco_json_path']
-        self.output_dir = self.config['output_dir']
+        self.image_dir = image_dir
+        self.coco_json_path = coco_json_path
+        self.output_dir = output_dir
 
         # Validate paths
         self._validate_paths()
@@ -47,62 +47,30 @@ class CocoDatasetSplitter:
         self.image_id_to_anns = defaultdict(list)
         self.file_to_img = {}
 
-        # Grouping: base name -> list of images
-        self.base_to_images = defaultdict(list)
-        self.group_idx_to_group = {}  # index -> list of image dicts
-        self.group_to_cats = defaultdict(set)  # group index -> set of category IDs
-        self.cat_to_candidate_groups = defaultdict(list)  # cat_id -> list of (group_idx, group)
+        # Grouping
+        self.group_idx_to_group = {}  # idx -> list of image dicts
+        self.group_to_cats = defaultdict(set)  # idx -> set of category IDs
+        self.cat_to_candidate_groups = defaultdict(list)  # cat_id -> list of (idx, group)
 
-        # Final group assignments
-        self.train_groups = set()  # set of group indices
+        # Assignments
+        self.train_groups = set()
         self.val_groups = set()
         self.test_groups = set()
-        self.assigned_groups = set()  # tracks assigned group indices
+        self.assigned_groups = set()
 
-        # Category counts per split (for balancing)
-        self.cat_counts = {
-            'train': Counter(),
-            'val': Counter(),
-            'test': Counter()
-        }
-
-    def _load_config(self, config_path: str) -> Dict[str, str]:
-        """
-        Load and validate the configuration from a YAML file.
-
-        :param config_path: Path to the YAML config file.
-        :return: Dictionary of configuration values.
-        """
-        if not os.path.exists(config_path):
-            raise FileNotFoundError(f"Config file not found: {config_path}")
-        with open(config_path, 'r') as f:
-            config = yaml.safe_load(f)
-
-        required = ['image_dir', 'coco_json_path', 'output_dir']
-        for key in required:
-            if key not in config:
-                raise ValueError(f"Missing required config key: {key}")
-            config[key] = os.path.expanduser(config[key])  # Expand ~
-        return config
+        # Category counts per split
+        self.cat_counts = {'train': Counter(), 'val': Counter(), 'test': Counter()}
 
     def _validate_paths(self):
-        """
-        Check that input directories and files exist; create output directory if needed.
-        """
+        """Check that input paths exist and create output directory."""
         if not os.path.isdir(self.image_dir):
             raise FileNotFoundError(f"Image directory not found: {self.image_dir}")
         if not os.path.isfile(self.coco_json_path):
-            raise FileNotFoundError(f"COCO JSON file not found: {self.coco_json_path}")
+            raise FileNotFoundError(f"COCO JSON not found: {self.coco_json_path}")
         os.makedirs(self.output_dir, exist_ok=True)
 
     def load_coco_data(self):
-        """
-        Load the COCO annotation JSON and populate internal data structures.
-
-        Sets:
-            self.coco_data, self.coco_images, self.annotations, self.categories
-            self.image_id_to_img, self.image_id_to_anns, self.file_to_img
-        """
+        """Load and parse the COCO annotation JSON."""
         print(f"Loading COCO data from: {self.coco_json_path}")
         with open(self.coco_json_path, 'r') as f:
             self.coco_data = json.load(f)
@@ -121,22 +89,19 @@ class CocoDatasetSplitter:
 
     def group_images_by_base(self):
         """
-        Group images by their base name (everything before the last underscore in the filename).
+        Group images by base name (everything before the last underscore in filename).
 
-        For example:
-            'test_a_orig.png', 'test_a_r90.png' → base 'test_a'
-        Groups are stored in self.group_idx_to_group, with each group being a list of image dicts.
+        Example: test_a_orig.png, test_a_r90.png to group 'test_a'
         """
         print("Grouping images by base name (prefix before last '_')...")
 
         def extract_base(filename: str) -> str:
-            """Extract base name by splitting on the last underscore."""
             stem, ext = os.path.splitext(filename)
             if '_' in stem:
                 return stem.rsplit('_', 1)[0]
             return stem
 
-        # Map base name to list of image indices
+        # Map base name to image indices
         base_to_indices = defaultdict(list)
         for idx, img in enumerate(self.coco_images):
             base = extract_base(img['file_name'])
@@ -144,12 +109,12 @@ class CocoDatasetSplitter:
 
         # Convert to indexed groups
         self.group_idx_to_group = {}
-        for idx, (base, img_indices) in enumerate(base_to_indices.items()):
-            self.group_idx_to_group[idx] = [self.coco_images[i] for i in img_indices]
+        for idx, (base, indices) in enumerate(base_to_indices.items()):
+            self.group_idx_to_group[idx] = [self.coco_images[i] for i in indices]
 
         print(f"Grouped into {len(self.group_idx_to_group)} base groups.")
 
-        # Map each group to the categories it contains
+        # Map each group to its categories
         self.group_to_cats = defaultdict(set)
         for group_idx, group in self.group_idx_to_group.items():
             img_ids = {img['id'] for img in group}
@@ -157,7 +122,7 @@ class CocoDatasetSplitter:
                 for ann in self.image_id_to_anns[img_id]:
                     self.group_to_cats[group_idx].add(ann['category_id'])
 
-        # Map each category to candidate groups that contain it
+        # Map each category to candidate groups
         self.cat_to_candidate_groups = defaultdict(list)
         for group_idx, group in self.group_idx_to_group.items():
             cats = self.group_to_cats[group_idx]
@@ -168,19 +133,15 @@ class CocoDatasetSplitter:
         for cat_id in self.cat_to_candidate_groups:
             self.cat_to_candidate_groups[cat_id].sort(key=lambda x: len(x[1]))
 
-        print(f"Annotated categories mapped across groups.")
-
     def ensure_category_coverage(self):
         """
-        Ensure every category appears in train, val, and test by reserving one group per category per split.
-
-        Assigns the smallest available group for each category to train, then val, then test.
+        Ensure each category appears in train, val, and test by assigning one group per split.
         """
-        print("Phase 1: Ensuring each category appears in train, val, and test...")
+        print("Phase 1: Ensuring category coverage in all splits...")
         all_cat_ids = set(self.cat_id_to_name.keys())
 
         for cat_id in all_cat_ids:
-            candidates = self.cat_to_candidate_groups[cat_id]  # Sorted by size
+            candidates = self.cat_to_candidate_groups[cat_id]
 
             # Assign to train
             assigned = False
@@ -220,26 +181,20 @@ class CocoDatasetSplitter:
 
     def assign_remaining_groups(self):
         """
-        Assign unassigned groups to minimize deviation from 70% train, 20% val, 10% test ratios.
-
-        Uses a greedy cost function based on per-category imbalance.
+        Assign remaining groups to minimize deviation from 70/20/10 ratio.
         """
         print("Phase 2: Assigning remaining groups to meet 70/20/10 ratio...")
         target_ratios = {'train': 0.7, 'val': 0.2, 'test': 0.1}
-        remaining_groups = [i for i in self.group_idx_to_group if i not in self.assigned_groups]
-        random.shuffle(remaining_groups)
+        remaining = [i for i in self.group_idx_to_group if i not in self.assigned_groups]
+        random.shuffle(remaining)
 
-        # Total number of groups each category appears in
+        # Total group count per category
         total_cat_counts = Counter()
         for idx in self.group_idx_to_group:
             for cat_id in self.group_to_cats[idx]:
                 total_cat_counts[cat_id] += 1
 
         def compute_cost(idx: int, split: str) -> float:
-            """
-            Compute cost of assigning group `idx` to `split` based on category imbalance.
-            Lower cost = better for ratio.
-            """
             loss = 0.0
             cats = self.group_to_cats[idx]
             for cat_id in cats:
@@ -252,7 +207,7 @@ class CocoDatasetSplitter:
                 loss += (error_after - error_before)
             return loss
 
-        for idx in remaining_groups:
+        for idx in remaining:
             costs = {sp: compute_cost(idx, sp) for sp in ['train', 'val', 'test']}
             chosen = min(costs, key=costs.get)
 
@@ -268,36 +223,26 @@ class CocoDatasetSplitter:
 
             self.assigned_groups.add(idx)
 
-    def _remap_coco_json(self, image_list: List[Dict]) -> Dict:
-        """
-        Remap image and annotation IDs to be contiguous starting from 0.
-
-        :param image_list: List of image dicts to include in the new JSON.
-        :return: New COCO-format dictionary with remapped IDs.
-        """
+    def _remap_coco_json(self, image_list):
+        """Remap image and annotation IDs to start from 0."""
         new_images = []
         new_annotations = []
-        ann_id_counter = 0
+        ann_id = 0
 
-        # Sort by original ID for determinism
-        sorted_images = sorted(image_list, key=lambda x: x['id'])
-
-        # Remap image IDs
-        img_id_map = {}
-        for new_id, img in enumerate(sorted_images):
-            old_id = img['id']
-            img_id_map[old_id] = new_id
+        sorted_imgs = sorted(image_list, key=lambda x: x['id'])
+        for new_id, img in enumerate(sorted_imgs):
             new_img = img.copy()
             new_img['id'] = new_id
             new_images.append(new_img)
 
-        # Remap annotation IDs and update image_id references
+        img_old_to_new = {img['id']: new_id for new_id, img in enumerate(new_images)}
+
         for img in new_images:
             old_id = self.file_to_img[img['file_name']]['id']
             for ann in self.image_id_to_anns[old_id]:
                 new_ann = ann.copy()
-                new_ann['id'] = ann_id_counter
-                ann_id_counter += 1
+                new_ann['id'] = ann_id
+                ann_id += 1
                 new_ann['image_id'] = img['id']
                 new_annotations.append(new_ann)
 
@@ -308,16 +253,13 @@ class CocoDatasetSplitter:
         }
 
     def save_splits(self):
-        """
-        Save train/val/test splits as COCO JSONs and copy corresponding images to output folders.
-        """
+        """Save split JSONs and copy images to output folders."""
         splits = {
             'train': self.train_groups,
             'val': self.val_groups,
             'test': self.test_groups
         }
 
-        # Extract full image lists and save
         for name, group_indices in splits.items():
             imgs = [img for idx in group_indices for img in self.group_idx_to_group[idx]]
             coco = self._remap_coco_json(imgs)
@@ -340,21 +282,19 @@ class CocoDatasetSplitter:
                     print(f"Source not found: {src}")
 
     def print_summary(self):
-        """
-        Print a final summary of the split: group/image counts and category distribution.
-        """
-        print("\n" + "="*50)
+        """Print final statistics and category distribution."""
+        print("\n" + "=" * 50)
         print("FINAL SPLIT SUMMARY")
-        print("="*50)
-        total_train_imgs = sum(len(self.group_idx_to_group[i]) for i in self.train_groups)
-        total_val_imgs = sum(len(self.group_idx_to_group[i]) for i in self.val_groups)
-        total_test_imgs = sum(len(self.group_idx_to_group[i]) for i in self.test_groups)
+        print("=" * 50)
+        tr_imgs = sum(len(self.group_idx_to_group[i]) for i in self.train_groups)
+        val_imgs = sum(len(self.group_idx_to_group[i]) for i in self.val_groups)
+        test_imgs = sum(len(self.group_idx_to_group[i]) for i in self.test_groups)
 
-        print(f"Train: {len(self.train_groups)} groups → {total_train_imgs} images")
-        print(f"Val:   {len(self.val_groups)} groups → {total_val_imgs} images")
-        print(f"Test:  {len(self.test_groups)} groups → {total_test_imgs} images")
+        print(f"Train: {len(self.train_groups)} groups to {tr_imgs} images")
+        print(f"Val:   {len(self.val_groups)} groups to {val_imgs} images")
+        print(f"Test:  {len(self.test_groups)} groups to {test_imgs} images")
 
-        # Verify all categories are in all splits
+        # Check category coverage
         train_cats = set().union(*(self.group_to_cats[i] for i in self.train_groups))
         val_cats = set().union(*(self.group_to_cats[i] for i in self.val_groups))
         test_cats = set().union(*(self.group_to_cats[i] for i in self.test_groups))
@@ -377,9 +317,7 @@ class CocoDatasetSplitter:
             print(f"{name:<15} {tr:<6} {va:<6} {te:<6}")
 
     def run(self):
-        """
-        Execute the full dataset splitting pipeline.
-        """
+        """Execute the full splitting pipeline."""
         print("Starting COCO dataset split...")
         self.load_coco_data()
         self.group_images_by_base()
@@ -390,15 +328,47 @@ class CocoDatasetSplitter:
         print(f"\nSplitOptions saved to: {self.output_dir}")
 
 
-# === CLI Usage ===
 if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Augment COCO dataset with geometric transforms.")
-    parser.add_argument('--config', type=str, default='config.yaml',
-                        help='Path to YAML config file (default: config.yaml)')
+    parser = argparse.ArgumentParser(
+        description="Split COCO dataset into train/val/test with grouped augmentation handling."
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        required=True,
+        help="Path to YAML config file containing: image_dir, coco_json_path, output_dir"
+    )
 
     args = parser.parse_args()
 
-    augmenter = CocoDatasetSplitter(config_path=args.config)
-    augmenter.augment()
+    # Validate config file
+    if not os.path.exists(args.config):
+        print(f"Config file not found: {args.config}")
+        sys.exit(1)
+
+    # Load config
+    with open(args.config, 'r') as f:
+        try:
+            config = yaml.safe_load(f)
+        except yaml.YAMLError as e:
+            print(f"YAML parse error: {e}")
+            sys.exit(1)
+
+    # Required fields
+    required = ["image_dir", "coco_json_path", "output_dir"]
+    for key in required:
+        if key not in config:
+            print(f"Missing required key in config: {key}")
+            sys.exit(1)
+
+    # Instantiate and run splitter
+    try:
+        splitter = CocoGroupDatasetSplitter(
+            image_dir=config["image_dir"],
+            coco_json_path=config["coco_json_path"],
+            output_dir=config["output_dir"]
+        )
+        splitter.run()
+    except Exception as e:
+        print(f"\nError: {e}")
+        sys.exit(1)
