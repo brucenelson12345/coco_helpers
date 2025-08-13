@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import os
 import json
 import cv2
@@ -7,6 +6,7 @@ from PIL import Image
 from copy import deepcopy
 import yaml
 import argparse
+from tqdm import tqdm  # Progress bar
 
 
 class COCOAugmenter:
@@ -22,14 +22,14 @@ class COCOAugmenter:
         output_images_dir,
         output_annotations_file,
         # Optional augmentation settings with defaults
-        rotations=True,
-        horizontal_flip=True,
-        vertical_flip=True,
-        rotate90_plus_vertical_flip=True,
-        rotate90_plus_horizontal_flip=True,
-        rotate90_plus_hv_flip=True,
+        rotations=None,
+        horizontal_flip=False,
+        vertical_flip=False,
+        rotate90_plus_vertical_flip=False,
+        rotate90_plus_horizontal_flip=False,
+        rotate90_plus_hv_flip=False,
         save_original=True,
-        image_extensions='.png'
+        image_extensions=None
     ):
         """
         Initialize the COCOAugmenter with required paths and optional augmentation settings.
@@ -44,9 +44,9 @@ class COCOAugmenter:
                 Defaults to None (no rotations).
             horizontal_flip (bool, optional): Apply left-right flip. Default: False.
             vertical_flip (bool, optional): Apply top-bottom flip. Default: False.
-            rotate90_plus_vertical_flip (bool, optional): Apply 90 rotation + vertical flip. Default: False.
-            rotate90_plus_horizontal_flip (bool, optional): Apply 90 rotation + horizontal flip. Default: False.
-            rotate90_plus_hv_flip (bool, optional): Apply 90 rotation + both flips. Default: False.
+            rotate90_plus_vertical_flip (bool, optional): Apply 90° rotation + vertical flip. Default: False.
+            rotate90_plus_horizontal_flip (bool, optional): Apply 90° rotation + horizontal flip. Default: False.
+            rotate90_plus_hv_flip (bool, optional): Apply 90° rotation + both flips. Default: False.
             save_original (bool, optional): If True, saves the original image as '_orig'. Default: True.
             image_extensions (list of str, optional): List of supported image extensions.
                 Defaults to ['.png', '.jpg', '.jpeg', '.bmp', '.tiff'].
@@ -102,8 +102,9 @@ class COCOAugmenter:
     def _build_transforms(self):
         """Builds transformation functions and suffix mappings based on enabled options."""
         # Always include original
-        self.transforms['orig'] = lambda img: img
-        self.suffix_map['orig'] = '_orig'
+        if self.save_original:
+            self.transforms['orig'] = lambda img: img
+            self.suffix_map['orig'] = '_orig'
 
         # Rotations: 90, 180, 270 degrees
         for angle in self.rotations:
@@ -138,22 +139,22 @@ class COCOAugmenter:
 
     @staticmethod
     def rotate_points(points, angle, cx, cy):
-        """Rotates a list of (x, y) points around center (cx, cy) by angle degrees."""
+        """Rotates points around (cx, cy) by angle degrees. Returns flat list."""
         angle_rad = np.radians(angle)
         cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
         points = np.array(points).reshape(-1, 2)
         rotated = (points - [cx, cy]) @ np.array([[cos_a, sin_a], [-sin_a, cos_a]]) + [cx, cy]
-        return rotated.reshape(-1).tolist()
+        return rotated.flatten().tolist()
 
     @staticmethod
     def flip_points(points, axis, img_w, img_h):
-        """Flips points horizontally (axis=0) or vertically (axis=1)."""
+        """Flips points horizontally (axis=0) or vertically (axis=1). Returns flat list."""
         points = np.array(points).reshape(-1, 2)
         if axis == 0:
             points[:, 0] = img_w - points[:, 0]
         elif axis == 1:
             points[:, 1] = img_h - points[:, 1]
-        return points.reshape(-1).tolist()
+        return points.flatten().tolist()
 
     def rotate_bbox(self, bbox, angle, img_w, img_h):
         """Computes new axis-aligned bounding box after rotation."""
@@ -182,91 +183,93 @@ class COCOAugmenter:
         new_ann = deepcopy(ann)
         bbox = new_ann.get('bbox')
 
-        if 'r90' in transform_key or 'r180' in transform_key or 'r270' in transform_key:
-            angle = 90 if 'r90' in transform_key else (180 if 'r180' in transform_key else 270)
-            if bbox:
-                new_ann['bbox'] = self.rotate_bbox(bbox, angle, orig_w, orig_h)
-            if 'segmentation' in new_ann:
-                segs = [
-                    self.rotate_points(seg, angle, orig_w / 2, orig_h / 2)
-                    for seg in new_ann['segmentation']
-                ]
-                new_ann['segmentation'] = [s.tolist() for s in segs]
+        # Transform segmentation if exists
+        if 'segmentation' in new_ann and isinstance(new_ann['segmentation'], list):
+            transformed_segs = []
+            for seg in new_ann['segmentation']:
+                seg = np.array(seg).reshape(-1).tolist()  # Normalize to flat list
 
-        elif transform_key == 'hflip':
-            if bbox:
-                new_ann['bbox'] = self.flip_bbox(bbox, 0, orig_w, orig_h)
-            if 'segmentation' in new_ann:
-                new_ann['segmentation'] = [
-                    self.flip_points(seg, 0, orig_w, orig_h) for seg in new_ann['segmentation']
-                ]
+                if 'r90' in transform_key or 'r180' in transform_key or 'r270' in transform_key:
+                    angle = 90 if 'r90' in transform_key else (180 if 'r180' in transform_key else 270)
+                    seg = self.rotate_points(seg, angle, orig_w / 2, orig_h / 2)
 
-        elif transform_key == 'vflip':
-            if bbox:
-                new_ann['bbox'] = self.flip_bbox(bbox, 1, orig_w, orig_h)
-            if 'segmentation' in new_ann:
-                new_ann['segmentation'] = [
-                    self.flip_points(seg, 1, orig_w, orig_h) for seg in new_ann['segmentation']
-                ]
+                elif transform_key == 'hflip':
+                    seg = self.flip_points(seg, 0, orig_w, orig_h)
+                elif transform_key == 'vflip':
+                    seg = self.flip_points(seg, 1, orig_w, orig_h)
 
-        elif transform_key == 'r90-vflip':
-            if bbox:
-                bbox = self.rotate_bbox(bbox, 90, orig_w, orig_h)
-                new_ann['bbox'] = self.flip_bbox(bbox, 1, new_w, new_h)
-            if 'segmentation' in new_ann:
-                segs = []
-                for seg in new_ann['segmentation']:
+                elif transform_key == 'r90-vflip':
                     seg = self.rotate_points(seg, 90, orig_w / 2, orig_h / 2)
                     seg = self.flip_points(seg, 1, new_w, new_h)
-                    segs.append(seg)
-                new_ann['segmentation'] = [s.tolist() for s in segs]
-
-        elif transform_key == 'r90-hflip':
-            if bbox:
-                bbox = self.rotate_bbox(bbox, 90, orig_w, orig_h)
-                new_ann['bbox'] = self.flip_bbox(bbox, 0, new_w, new_h)
-            if 'segmentation' in new_ann:
-                segs = []
-                for seg in new_ann['segmentation']:
+                elif transform_key == 'r90-hflip':
                     seg = self.rotate_points(seg, 90, orig_w / 2, orig_h / 2)
                     seg = self.flip_points(seg, 0, new_w, new_h)
-                    segs.append(seg)
-                new_ann['segmentation'] = [s.tolist() for s in segs]
+                elif transform_key == 'r90-hvflip':
+                    seg = self.rotate_points(seg, 90, orig_w / 2, orig_h / 2)
+                    seg = self.flip_points(seg, 0, new_w, new_h)
+                    seg = self.flip_points(seg, 1, new_w, new_h)
 
-        elif transform_key == 'r90-hvflip':
-            if bbox:
+                # Ensure final format is pure Python list
+                seg = np.array(seg).flatten().tolist()
+                transformed_segs.append(seg)
+
+            new_ann['segmentation'] = transformed_segs
+
+        # Transform bbox
+        if bbox:
+            x, y, w, h = bbox
+
+            if 'r90' in transform_key or 'r180' in transform_key or 'r270' in transform_key:
+                angle = 90 if 'r90' in transform_key else (180 if 'r180' in transform_key else 270)
+                new_ann['bbox'] = self.rotate_bbox(bbox, angle, orig_w, orig_h)
+
+            elif transform_key == 'hflip':
+                new_ann['bbox'] = self.flip_bbox(bbox, 0, orig_w, orig_h)
+            elif transform_key == 'vflip':
+                new_ann['bbox'] = self.flip_bbox(bbox, 1, orig_w, orig_h)
+
+            elif transform_key == 'r90-vflip':
+                bbox = self.rotate_bbox(bbox, 90, orig_w, orig_h)
+                new_ann['bbox'] = self.flip_bbox(bbox, 1, new_w, new_h)
+            elif transform_key == 'r90-hflip':
+                bbox = self.rotate_bbox(bbox, 90, orig_w, orig_h)
+                new_ann['bbox'] = self.flip_bbox(bbox, 0, new_w, new_h)
+            elif transform_key == 'r90-hvflip':
                 bbox = self.rotate_bbox(bbox, 90, orig_w, orig_h)
                 bbox = self.flip_bbox(bbox, 0, new_w, new_h)
                 new_ann['bbox'] = self.flip_bbox(bbox, 1, new_w, new_h)
-            if 'segmentation' in new_ann:
-                segs = []
-                for seg in new_ann['segmentation']:
-                    seg = self.rotate_points(seg, 90, orig_w / 2, orig_h / 2)
-                    seg = self.flip_points(seg, 0, new_w, new_h)
-                    seg = self.flip_points(seg, 1, new_w, new_h)
-                    segs.append(seg)
-                new_ann['segmentation'] = [s.tolist() for s in segs]
 
         return new_ann
 
     def augment(self):
-        """Run full augmentation pipeline: transform images and update annotations."""
+        """Run full augmentation pipeline with progress bar."""
         print("Starting COCO dataset augmentation...")
+
+        # Count total transformations
+        total_transforms = len(self.transforms)
+        total_images = len(self.images)
+        total_operations = total_images * total_transforms
+
+        # Progress bar
+        pbar = tqdm(total=total_operations, desc="Processing images", unit="image")
 
         for img_id, img_info in self.images.items():
             filename = img_info['file_name']
             base_name, ext = os.path.splitext(filename)
             if ext.lower() not in self.image_extensions:
+                pbar.update(total_transforms)
                 continue
 
             img_path = os.path.join(self.images_dir, filename)
             if not os.path.exists(img_path):
                 print(f"Image not found: {img_path}")
+                pbar.update(total_transforms)
                 continue
 
             img_bgr = cv2.imread(img_path)
             if img_bgr is None:
                 print(f"Failed to load image: {img_path}")
+                pbar.update(total_transforms)
                 continue
             img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
             orig_h, orig_w = img_rgb.shape[:2]
@@ -276,14 +279,17 @@ class COCOAugmenter:
                     transformed_img = transform_func(img_rgb.copy())
                 except Exception as e:
                     print(f"Error applying {key} to {filename}: {e}")
+                    pbar.update(1)
                     continue
 
                 suffix = self.suffix_map[key]
                 out_filename = f"{base_name}{suffix}{ext}"
                 out_path = os.path.join(self.output_images_dir, out_filename)
 
+                # Save image
                 Image.fromarray(transformed_img).save(out_path)
 
+                # Add image metadata
                 new_img_id = f"{img_id}{suffix}"
                 self.output_images.append({
                     "id": new_img_id,
@@ -292,6 +298,7 @@ class COCOAugmenter:
                     "height": transformed_img.shape[0]
                 })
 
+                # Transform annotations
                 img_anns = self.anns_by_image.get(img_id, [])
                 for ann in img_anns:
                     new_ann = self.transform_annotation(
@@ -301,6 +308,11 @@ class COCOAugmenter:
                     new_ann['image_id'] = new_img_id
                     new_ann['id'] = f"{ann['id']}{suffix}"
                     self.output_annotations.append(new_ann)
+
+                # Update progress bar
+                pbar.update(1)
+
+        pbar.close()
 
         # Save updated COCO JSON
         output_coco = {
@@ -345,32 +357,33 @@ if __name__ == "__main__":
     output_images_dir = output_cfg['output_images_dir']
     output_annotations_file = output_cfg['output_annotations_file']
 
-    # Optional settings (with defaults handled in class)
+    # Optional settings
     aug_cfg = config.get('AUGMENTATIONS', {})
-    optional_args = {
-        key: config.get(key) for key in [
-            'rotations',
-            'horizontal_flip',
-            'vertical_flip',
-            'rotate90_plus_vertical_flip',
-            'rotate90_plus_horizontal_flip',
-            'rotate90_plus_hv_flip',
-            'save_original',
-            'image_extensions'
-        ] if key in config
-    }
-    # Also allow AUGMENTATIONS to contain the flags
-    optional_args.update({
-        key: aug_cfg.get(key, False) for key in [
-            'horizontal_flip',
-            'vertical_flip',
-            'rotate90_plus_vertical_flip',
-            'rotate90_plus_horizontal_flip',
-            'rotate90_plus_hv_flip'
-        ]
-    })
+    optional_args = {}
+
+    # Handle optional booleans
+    for key in [
+        'horizontal_flip',
+        'vertical_flip',
+        'rotate90_plus_vertical_flip',
+        'rotate90_plus_horizontal_flip',
+        'rotate90_plus_hv_flip',
+        'save_original'
+    ]:
+        # Try top-level first, then AUGMENTATIONS
+        val = config.get(key)
+        if val is None:
+            val = aug_cfg.get(key, False)
+        optional_args[key] = val
+
+    # Handle lists
     if 'rotations' in aug_cfg:
         optional_args['rotations'] = aug_cfg['rotations']
+    elif 'rotations' in config:
+        optional_args['rotations'] = config['rotations']
+
+    if 'image_extensions' in config:
+        optional_args['image_extensions'] = config['image_extensions']
 
     # Instantiate and run
     augmenter = COCOAugmenter(
