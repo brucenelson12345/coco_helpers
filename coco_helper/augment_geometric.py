@@ -6,13 +6,14 @@ from PIL import Image
 from copy import deepcopy
 import yaml
 import argparse
-from tqdm import tqdm  # Progress bar
+from tqdm import tqdm
 
 
 class COCOAugmenter:
     """
     COCOAugmenter class for geometric augmentation of COCO-formatted datasets.
     Applies rotations, flips, and combinations, updates image files and annotations accordingly.
+    Ensures all image_id and annotation_id are clean integers starting from 0.
     """
 
     def __init__(
@@ -32,7 +33,7 @@ class COCOAugmenter:
         image_extensions=None
     ):
         """
-        Initialize the COCOAugmenter with required paths and optional augmentation settings.
+        Initialize and sanitize COCO dataset: ensure image_id and annotation_id are integers.
 
         Args:
             images_dir (str): Path to the folder containing original images.
@@ -41,15 +42,13 @@ class COCOAugmenter:
             output_annotations_file (str): Path to save the updated COCO JSON file.
 
             rotations (list of int, optional): List of rotation angles (e.g., [90, 180, 270]).
-                Defaults to None (no rotations).
-            horizontal_flip (bool, optional): Apply left-right flip. Default: False.
-            vertical_flip (bool, optional): Apply top-bottom flip. Default: False.
-            rotate90_plus_vertical_flip (bool, optional): Apply 90° rotation + vertical flip. Default: False.
-            rotate90_plus_horizontal_flip (bool, optional): Apply 90° rotation + horizontal flip. Default: False.
-            rotate90_plus_hv_flip (bool, optional): Apply 90° rotation + both flips. Default: False.
-            save_original (bool, optional): If True, saves the original image as '_orig'. Default: True.
-            image_extensions (list of str, optional): List of supported image extensions.
-                Defaults to ['.png', '.jpg', '.jpeg', '.bmp', '.tiff'].
+            horizontal_flip (bool): Apply left-right flip.
+            vertical_flip (bool): Apply top-bottom flip.
+            rotate90_plus_vertical_flip (bool): Apply 90° + vertical flip.
+            rotate90_plus_horizontal_flip (bool): Apply 90° + horizontal flip.
+            rotate90_plus_hv_flip (bool): Apply 90° + both flips.
+            save_original (bool): If True, saves original image as '_orig'.
+            image_extensions (list of str): Supported image extensions.
         """
         # Required paths
         self.images_dir = images_dir
@@ -57,7 +56,7 @@ class COCOAugmenter:
         self.output_images_dir = output_images_dir
         self.output_annotations_file = output_annotations_file
 
-        # Optional settings with defaults
+        # Optional settings
         self.rotations = rotations or []
         self.horizontal_flip = horizontal_flip
         self.vertical_flip = vertical_flip
@@ -71,7 +70,7 @@ class COCOAugmenter:
         # Create output directory
         os.makedirs(self.output_images_dir, exist_ok=True)
 
-        # Load COCO dataset
+        # Load COCO data
         if not os.path.exists(self.annotations_file):
             raise FileNotFoundError(f"Annotations file not found: {self.annotations_file}")
         if not os.path.exists(self.images_dir):
@@ -80,14 +79,50 @@ class COCOAugmenter:
         with open(self.annotations_file, 'r') as f:
             self.coco_data = json.load(f)
 
-        self.images = {img['id']: img for img in self.coco_data['images']}
-        self.annotations = self.coco_data['annotations']
-        self.categories = self.coco_data['categories']
+        # === Sanitize image IDs: map to integers ===
+        self.original_to_clean_image_id = {}
+        clean_image_id = 0
+        self.images = []
+        for img in self.coco_data['images']:
+            original_id = img['id']
+            try:
+                clean_id = int(original_id)
+            except (ValueError, TypeError):
+                clean_id = clean_image_id
+                clean_image_id += 1
+            self.original_to_clean_image_id[original_id] = clean_id
+            img['id'] = clean_id
+            self.images.append(img)
 
-        # Map annotations by image ID
+        # === Sanitize annotation IDs and fix image_id references ===
+        self.annotations = []
+        clean_ann_id = 0
         self.anns_by_image = {}
-        for ann in self.annotations:
+
+        for ann in self.coco_data['annotations']:
+            original_id = ann['id']
+            try:
+                clean_id = int(original_id)
+            except (ValueError, TypeError):
+                clean_id = clean_ann_id
+                clean_ann_id += 1
+            ann['id'] = clean_id
+
+            # Fix image_id
+            orig_img_id = ann['image_id']
+            if orig_img_id in self.original_to_clean_image_id:
+                ann['image_id'] = self.original_to_clean_image_id[orig_img_id]
+            else:
+                try:
+                    ann['image_id'] = int(orig_img_id)
+                except (ValueError, TypeError):
+                    print(f"Warning: annotation {clean_id} has invalid image_id {orig_img_id}")
+                    continue
+
+            self.annotations.append(ann)
             self.anns_by_image.setdefault(ann['image_id'], []).append(ann)
+
+        self.categories = self.coco_data['categories']
 
         # Output containers
         self.output_images = []
@@ -100,13 +135,11 @@ class COCOAugmenter:
         self._build_transforms()
 
     def _build_transforms(self):
-        """Builds transformation functions and suffix mappings based on enabled options."""
-        # Always include original
+        """Builds transformation functions and suffix mappings."""
         if self.save_original:
             self.transforms['orig'] = lambda img: img
             self.suffix_map['orig'] = '_orig'
 
-        # Rotations: 90, 180, 270 degrees
         for angle in self.rotations:
             if angle not in (90, 180, 270):
                 print(f"Skipping unsupported rotation angle: {angle}")
@@ -116,7 +149,6 @@ class COCOAugmenter:
             self.transforms[key] = lambda img, k=k: np.rot90(img, k)
             self.suffix_map[key] = f'_r{angle}'
 
-        # Flips
         if self.horizontal_flip:
             self.transforms['hflip'] = lambda img: cv2.flip(img, 1)
             self.suffix_map['hflip'] = '_hflip'
@@ -139,7 +171,7 @@ class COCOAugmenter:
 
     @staticmethod
     def rotate_points(points, angle, cx, cy):
-        """Rotates points around (cx, cy) by angle degrees. Returns flat list."""
+        """Rotates points around center (cx, cy) by angle degrees. Returns flat list."""
         angle_rad = np.radians(angle)
         cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
         points = np.array(points).reshape(-1, 2)
@@ -183,11 +215,11 @@ class COCOAugmenter:
         new_ann = deepcopy(ann)
         bbox = new_ann.get('bbox')
 
-        # Transform segmentation if exists
+        # Transform segmentation
         if 'segmentation' in new_ann and isinstance(new_ann['segmentation'], list):
             transformed_segs = []
             for seg in new_ann['segmentation']:
-                seg = np.array(seg).reshape(-1).tolist()  # Normalize to flat list
+                seg = np.array(seg).reshape(-1).tolist()
 
                 if 'r90' in transform_key or 'r180' in transform_key or 'r270' in transform_key:
                     angle = 90 if 'r90' in transform_key else (180 if 'r180' in transform_key else 270)
@@ -209,7 +241,6 @@ class COCOAugmenter:
                     seg = self.flip_points(seg, 0, new_w, new_h)
                     seg = self.flip_points(seg, 1, new_w, new_h)
 
-                # Ensure final format is pure Python list
                 seg = np.array(seg).flatten().tolist()
                 transformed_segs.append(seg)
 
@@ -217,8 +248,6 @@ class COCOAugmenter:
 
         # Transform bbox
         if bbox:
-            x, y, w, h = bbox
-
             if 'r90' in transform_key or 'r180' in transform_key or 'r270' in transform_key:
                 angle = 90 if 'r90' in transform_key else (180 if 'r180' in transform_key else 270)
                 new_ann['bbox'] = self.rotate_bbox(bbox, angle, orig_w, orig_h)
@@ -242,20 +271,25 @@ class COCOAugmenter:
         return new_ann
 
     def augment(self):
-        """Run full augmentation pipeline with progress bar."""
+        """Run full augmentation pipeline with clean integer IDs and progress bar."""
         print("Starting COCO dataset augmentation...")
 
-        # Count total transformations
-        total_transforms = len(self.transforms)
-        total_images = len(self.images)
-        total_operations = total_images * total_transforms
+        output_images = []
+        output_annotations = []
 
-        # Progress bar
+        current_image_id = 0
+        current_ann_id = 0
+
+        total_transforms = len(self.transforms)
+        total_original_images = len(self.images)
+        total_operations = total_original_images * total_transforms
+
         pbar = tqdm(total=total_operations, desc="Processing images", unit="image")
 
-        for img_id, img_info in self.images.items():
+        for img_info in self.images:
             filename = img_info['file_name']
             base_name, ext = os.path.splitext(filename)
+
             if ext.lower() not in self.image_extensions:
                 pbar.update(total_transforms)
                 continue
@@ -274,6 +308,8 @@ class COCOAugmenter:
             img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
             orig_h, orig_w = img_rgb.shape[:2]
 
+            img_anns = self.anns_by_image.get(img_info['id'], [])
+
             for key, transform_func in self.transforms.items():
                 try:
                     transformed_img = transform_func(img_rgb.copy())
@@ -286,33 +322,34 @@ class COCOAugmenter:
                 out_filename = f"{base_name}{suffix}{ext}"
                 out_path = os.path.join(self.output_images_dir, out_filename)
 
-                # Save image
                 Image.fromarray(transformed_img).save(out_path)
 
-                # Add image metadata
-                new_img_id = f"{img_id}{suffix}"
-                self.output_images.append({
+                new_img_id = current_image_id
+                current_image_id += 1
+
+                output_images.append({
                     "id": new_img_id,
                     "file_name": out_filename,
                     "width": transformed_img.shape[1],
                     "height": transformed_img.shape[0]
                 })
 
-                # Transform annotations
-                img_anns = self.anns_by_image.get(img_id, [])
                 for ann in img_anns:
                     new_ann = self.transform_annotation(
                         ann, key, orig_w, orig_h,
                         transformed_img.shape[1], transformed_img.shape[0]
                     )
+                    new_ann['id'] = current_ann_id
+                    current_ann_id += 1
                     new_ann['image_id'] = new_img_id
-                    new_ann['id'] = f"{ann['id']}{suffix}"
-                    self.output_annotations.append(new_ann)
+                    output_annotations.append(new_ann)
 
-                # Update progress bar
                 pbar.update(1)
 
         pbar.close()
+
+        self.output_images = output_images
+        self.output_annotations = output_annotations
 
         # Save updated COCO JSON
         output_coco = {
@@ -326,7 +363,8 @@ class COCOAugmenter:
 
         print(f"Augmentation complete!")
         print(f"   - {len(self.output_images)} images saved to '{self.output_images_dir}'")
-        print(f"   - Annotations saved to '{self.output_annotations_file}'")
+        print(f"   - {len(self.output_annotations)} annotations saved")
+        print(f"   - All image_id and annotation_id are sequential integers starting from 0")
 
 
 if __name__ == "__main__":
@@ -341,14 +379,12 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # Load YAML config
     if not os.path.exists(args.config):
         raise FileNotFoundError(f"Config file not found: {args.config}")
 
     with open(args.config, 'r') as f:
         config = yaml.safe_load(f)
 
-    # Extract required paths
     input_cfg = config['INPUT']
     output_cfg = config['OUTPUT']
 
@@ -357,11 +393,9 @@ if __name__ == "__main__":
     output_images_dir = output_cfg['output_images_dir']
     output_annotations_file = output_cfg['output_annotations_file']
 
-    # Optional settings
     aug_cfg = config.get('AUGMENTATIONS', {})
     optional_args = {}
 
-    # Handle optional booleans
     for key in [
         'horizontal_flip',
         'vertical_flip',
@@ -370,13 +404,11 @@ if __name__ == "__main__":
         'rotate90_plus_hv_flip',
         'save_original'
     ]:
-        # Try top-level first, then AUGMENTATIONS
         val = config.get(key)
         if val is None:
             val = aug_cfg.get(key, False)
         optional_args[key] = val
 
-    # Handle lists
     if 'rotations' in aug_cfg:
         optional_args['rotations'] = aug_cfg['rotations']
     elif 'rotations' in config:
@@ -385,7 +417,6 @@ if __name__ == "__main__":
     if 'image_extensions' in config:
         optional_args['image_extensions'] = config['image_extensions']
 
-    # Instantiate and run
     augmenter = COCOAugmenter(
         images_dir=images_dir,
         annotations_file=annotations_file,
