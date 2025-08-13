@@ -1,0 +1,33 @@
+# ========================================
+# Inference & Evaluation Configuration
+# ========================================
+
+# Path to the dataset directory (should contain 'images/' and 'annotations.json')
+data_dir: "test"
+
+# Path to the YOLO model weights (supports .pt files from Ultralytics)
+# Can be a pretrained model (e.g., yolov8n.pt, yolov8x.pt) or a custom trained model
+weights: "yolov8x.pt"  # or "path/to/your/custom_model.pt"
+
+# Output directory where results will be saved
+output_dir: "inference_results"
+
+# Device to run inference on: 'cuda' for GPU, 'cpu' for CPU
+device: "cuda"
+
+# Confidence threshold for detections (skip low-confidence predictions)
+conf_threshold: 0.25
+
+# Optional: debug mode (not used here but can be extended)
+# debug: False
+
+# ========================================
+# Notes:
+# - Ensure 'annotations.json' is in COCO format.
+# - Image files in 'data_dir/images/' should be .png (as per your requirement).
+# - After running, output will include:
+#     inference_results/
+#     ├── images/           # Visualized images with colored bounding boxes
+#     └── mAP_results.txt   # mAP scores (overall and per-class)
+# - Each class gets a unique, consistent color across all images.
+# ========================================

@@ -1,0 +1,79 @@
+# ===========================================================================
+# YOLOv8 Training Configuration
+#
+# This file defines all settings for training a YOLOv8 model.
+# Only `dataset_path` is REQUIRED.
+# All other fields are OPTIONAL and will use sensible defaults if omitted.
+#
+# Usage:
+#   python train_yolov8.py config_example.yaml
+# ===========================================================================
+
+
+# -----------------------------------------------------------------------------
+# REQUIRED: Dataset root path
+# -----------------------------------------------------------------------------
+# Path to the dataset root directory containing 'train/', 'val/', and 'test/'
+# This is the only required field.
+# -----------------------------------------------------------------------------
+dataset_path: /path/to/your/dataset_root   # ✅ REQUIRED
+
+
+# -----------------------------------------------------------------------------
+# OPTIONAL: Class definitions (auto-inferred from train/annotations.json)
+# -----------------------------------------------------------------------------
+# If omitted, the script reads `train/annotations.json` (COCO format) to
+# automatically determine num_classes and class_names.
+# Only needed if you want to override auto-detection.
+# -----------------------------------------------------------------------------
+# num_classes: 3
+# class_names: [person, bicycle, car]
+
+
+# -----------------------------------------------------------------------------
+# OPTIONAL: Model & Training Parameters
+# -----------------------------------------------------------------------------
+# model_size:     One of 'n', 's', 'm', 'l', 'x' → uses yolov8{size}.pt
+# epochs:         Number of training epochs
+# imgsz:          Input image size (square, e.g., 640)
+# batch:          Batch size (-1 for auto-batch)
+# workers:        Number of CPU workers for data loading
+# pretrained:     Path to a custom .pt model (e.g., fine-tuning or resume)
+#                 If not provided, downloads yolov8{model_size}.pt
+# -----------------------------------------------------------------------------
+model_size: n              # default: 'n'
+epochs: 100                # default: 100
+imgsz: 640                 # default: 640
+batch: 16                  # default: 16, use -1 for auto
+workers: 8                 # default: 8
+# pretrained: ./runs/train/exp/weights/best.pt   # optional
+
+
+# -----------------------------------------------------------------------------
+# OPTIONAL: Output & Logging
+# -----------------------------------------------------------------------------
+# project:      Directory to save training runs
+# name:         Subdirectory name (experiment name)
+# exist_ok:     If true, allows overwriting existing experiment folder
+# -----------------------------------------------------------------------------
+project: runs/train        # default: 'runs/train'
+name: yolov8n_train        # default: 'yolov8{model_size}_train'
+exist_ok: true             # default: True
+
+
+# -----------------------------------------------------------------------------
+# OPTIONAL: Evaluation
+# -----------------------------------------------------------------------------
+# evaluate_on_test:   If true, runs final evaluation on the test set
+# -----------------------------------------------------------------------------
+evaluate_on_test: true     # default: False
+
+
+# =============================================================================
+# 💡 Notes:
+#   - If `pretrained` is not set, the model starts from official YOLOv8 weights.
+#   - `num_classes` and `class_names` are auto-detected from:
+#         dataset_path/train/annotations.json  (must be COCO format)
+#   - Label files (.txt) must exist in each labels/ folder in YOLO format.
+#   - Supported image formats: .png, .jpg, .jpeg, .bmp
+# =============================================================================
