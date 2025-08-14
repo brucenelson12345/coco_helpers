@@ -113,19 +113,23 @@ class COCOAugmenter:
         self._build_transforms()
 
     def _build_transforms(self):
-        """Build transformation functions and filename suffix mappings."""
+        self.transforms = {}
+        self.suffix_map = {}
+
         if self.save_original:
             self.transforms['orig'] = lambda img: img
             self.suffix_map['orig'] = '_orig'
 
-        for angle in self.rotations:
-            if angle not in (90, 180, 270):
-                print(f"Skipping unsupported rotation angle: {angle}")
-                continue
-            k = angle // 90
-            key = f'r{angle}'
-            self.transforms[key] = lambda img, k=k: np.rot90(img, k)
-            self.suffix_map[key] = f'_r{angle}'
+        # For 90, 180, 270: np.rot90(img, k) where k=1,2,3
+        if 90 in self.rotations:
+            self.transforms['r90'] = lambda img: np.rot90(img, 1)
+            self.suffix_map['r90'] = '_r90'
+        if 180 in self.rotations:
+            self.transforms['r180'] = lambda img: np.rot90(img, 2)
+            self.suffix_map['r180'] = '_r180'
+        if 270 in self.rotations:
+            self.transforms['r270'] = lambda img: np.rot90(img, 3)
+            self.suffix_map['r270'] = '_r270'
 
         if self.horizontal_flip:
             self.transforms['hflip'] = lambda img: cv2.flip(img, 1)
@@ -147,7 +151,6 @@ class COCOAugmenter:
             self.transforms['r90-hvflip'] = lambda img: cv2.flip(np.rot90(img, 1), -1)
             self.suffix_map['r90-hvflip'] = '_r90-hvflip'
 
-    @staticmethod
     def rotate_points(points, angle, cx, cy):
         """Rotates points around center (cx, cy) by angle degrees. Returns flat list."""
         angle_rad = np.radians(angle)
@@ -156,105 +159,159 @@ class COCOAugmenter:
         rotated = (points - [cx, cy]) @ np.array([[cos_a, sin_a], [-sin_a, cos_a]]) + [cx, cy]
         return rotated.flatten().tolist()
 
-    @staticmethod
-    def flip_points(points, axis, img_w, img_h):
-        """Flips points horizontally (axis=0) or vertically (axis=1). Returns flat list."""
+    def flip_bbox(self, bbox, axis, img_w, img_h):
+        """Flip bbox horizontally (axis=0) or vertically (axis=1)."""
+        x, y, w, h = bbox
+        if axis == 0:  # Horizontal flip
+            x = img_w - (x + w)
+        elif axis == 1:  # Vertical flip
+            y = img_h - (y + h)
+        return [int(round(coord)) for coord in [x, y, w, h]]
+
+
+    def flip_points(self, points, axis, img_w, img_h):
+        """Flip points horizontally or vertically."""
         points = np.array(points).reshape(-1, 2)
-        if axis == 0:
+        if axis == 0:  # H-flip
             points[:, 0] = img_w - points[:, 0]
-        elif axis == 1:
+        elif axis == 1:  # V-flip
             points[:, 1] = img_h - points[:, 1]
-        return points.flatten().tolist()
+        return [int(round(x)) for x in points.flatten().tolist()]
 
     def rotate_bbox(self, bbox, angle, img_w, img_h):
-        """Computes new axis-aligned bounding box after rotation."""
+        """
+        Rotate bounding box by angle (90, 180, 270) and return new axis-aligned box.
+        Uses coordinate geometry to handle 90° swaps correctly.
+        """
         x, y, w, h = bbox
-        corners = [[x, y], [x + w, y], [x + w, y + h], [x, y + h]]
-        center = (img_w / 2, img_h / 2)
-        rotated_corners = self.rotate_points(corners, angle, center[0], center[1])
-        rotated_corners = np.array(rotated_corners).reshape(-1, 2)
-        x_min = rotated_corners[:, 0].min()
-        y_min = rotated_corners[:, 1].min()
-        x_max = rotated_corners[:, 0].max()
-        y_max = rotated_corners[:, 1].max()
-        return [x_min, y_min, x_max - x_min, y_max - y_min]
+        corners = np.array([
+            [x, y],
+            [x + w, y],
+            [x + w, y + h],
+            [x, y + h]
+        ])
 
-    def flip_bbox(self, bbox, axis, img_w, img_h):
-        """Flips bounding box horizontally or vertically."""
-        x, y, w, h = bbox
-        if axis == 0:
-            x = img_w - (x + w)
-        elif axis == 1:
-            y = img_h - (y + h)
-        return [x, y, w, h]
+        if angle == 90:
+            # Rotate 90° CCW: (x, y) -> (y, w_img - x)
+            new_corners = np.zeros_like(corners)
+            new_corners[:, 0] = corners[:, 1]  # y becomes x
+            new_corners[:, 1] = img_w - corners[:, 0]  # w - x becomes y
+        elif angle == 180:
+            new_corners = np.zeros_like(corners)
+            new_corners[:, 0] = img_w - corners[:, 0]
+            new_corners[:, 1] = img_h - corners[:, 1]
+        elif angle == 270:
+            # Rotate 270° CCW (or 90° CW): (x, y) -> (h_img - y, x)
+            new_corners = np.zeros_like(corners)
+            new_corners[:, 0] = img_h - corners[:, 1]
+            new_corners[:, 1] = corners[:, 0]
+        else:
+            raise ValueError(f"Unsupported rotation angle: {angle}")
+
+        x_min = new_corners[:, 0].min()
+        y_min = new_corners[:, 1].min()
+        x_max = new_corners[:, 0].max()
+        y_max = new_corners[:, 1].max()
+
+        # Ensure positive width/height
+        return [
+            int(round(x_min)),
+            int(round(y_min)),
+            int(round(x_max - x_min)),
+            int(round(y_max - y_min))
+        ]
+
+    def rotate_points(self, points, angle, img_w, img_h):
+        """
+        Rotate polygon points by 90, 180, or 270 degrees.
+        """
+        points = np.array(points).reshape(-1, 2)
+        if angle == 90:
+            # (x, y) -> (y, w - x)
+            rotated = np.zeros_like(points)
+            rotated[:, 0] = points[:, 1]
+            rotated[:, 1] = img_w - points[:, 0]
+        elif angle == 180:
+            rotated = np.zeros_like(points)
+            rotated[:, 0] = img_w - points[:, 0]
+            rotated[:, 1] = img_h - points[:, 1]
+        elif angle == 270:
+            # (x, y) -> (h - y, x)
+            rotated = np.zeros_like(points)
+            rotated[:, 0] = img_h - points[:, 1]
+            rotated[:, 1] = points[:, 0]
+        else:
+            raise ValueError(f"Unsupported rotation angle: {angle}")
+
+        return [int(round(x)) for x in rotated.flatten().tolist()]
 
     def transform_annotation(self, ann, transform_key, orig_w, orig_h, new_w, new_h):
-        """Transforms bbox and segmentation; converts coordinates to integers."""
-        new_ann = deepcopy(ann)
-        bbox = new_ann.get('bbox')
+        """Transform bbox and segmentation; ensure output is clean."""
+        new_ann = {
+            'category_id': ann['category_id'],
+            'iscrowd': ann.get('iscrowd', 0),
+            'area': ann.get('area', 0)
+        }
 
-        # Transform segmentation
-        if 'segmentation' in new_ann and isinstance(new_ann['segmentation'], list):
-            transformed_segs = []
-            for seg in new_ann['segmentation']:
-                seg = np.array(seg).reshape(-1).tolist()
+        # Transform segmentation if exists
+        if 'segmentation' in ann and ann['segmentation']:
+            segs = []
+            for seg in ann['segmentation']:
+                points = np.array(seg).reshape(-1, 2).tolist()
+                transformed = []
 
                 if 'r90' in transform_key or 'r180' in transform_key or 'r270' in transform_key:
                     angle = 90 if 'r90' in transform_key else (180 if 'r180' in transform_key else 270)
-                    seg = self.rotate_points(seg, angle, orig_w / 2, orig_h / 2)
-
+                    transformed = self.rotate_points(seg, angle, orig_w, orig_h)
                 elif transform_key == 'hflip':
-                    seg = self.flip_points(seg, 0, orig_w, orig_h)
+                    transformed = self.flip_points(seg, 0, orig_w, orig_h)
                 elif transform_key == 'vflip':
-                    seg = self.flip_points(seg, 1, orig_w, orig_h)
-
+                    transformed = self.flip_points(seg, 1, orig_w, orig_h)
                 elif transform_key == 'r90-vflip':
-                    seg = self.rotate_points(seg, 90, orig_w / 2, orig_h / 2)
-                    seg = self.flip_points(seg, 1, new_w, new_h)
+                    seg = self.rotate_points(seg, 90, orig_w, orig_h)
+                    transformed = self.flip_points(seg, 1, new_w, new_h)
                 elif transform_key == 'r90-hflip':
-                    seg = self.rotate_points(seg, 90, orig_w / 2, orig_h / 2)
-                    seg = self.flip_points(seg, 0, new_w, new_h)
+                    seg = self.rotate_points(seg, 90, orig_w, orig_h)
+                    transformed = self.flip_points(seg, 0, new_w, new_h)
                 elif transform_key == 'r90-hvflip':
-                    seg = self.rotate_points(seg, 90, orig_w / 2, orig_h / 2)
+                    seg = self.rotate_points(seg, 90, orig_w, orig_h)
                     seg = self.flip_points(seg, 0, new_w, new_h)
-                    seg = self.flip_points(seg, 1, new_w, new_h)
+                    transformed = self.flip_points(seg, 1, new_w, new_h)
+                else:  # orig
+                    transformed = [int(round(x)) for x in seg]
 
-                # Convert to integers
-                seg = [int(round(x)) for x in seg]
-                transformed_segs.append(seg)
-
-            new_ann['segmentation'] = transformed_segs
+                segs.append(transformed)
+            new_ann['segmentation'] = segs
+        else:
+            new_ann['segmentation'] = []
 
         # Transform bbox
-        if bbox:
+        if 'bbox' in ann and ann['bbox']:
+            x, y, w, h = ann['bbox']
             if 'r90' in transform_key or 'r180' in transform_key or 'r270' in transform_key:
                 angle = 90 if 'r90' in transform_key else (180 if 'r180' in transform_key else 270)
-                new_bbox = self.rotate_bbox(bbox, angle, orig_w, orig_h)
-                new_ann['bbox'] = [int(round(coord)) for coord in new_bbox]
-
+                new_ann['bbox'] = self.rotate_bbox(ann['bbox'], angle, orig_w, orig_h)
             elif transform_key == 'hflip':
-                new_bbox = self.flip_bbox(bbox, 0, orig_w, orig_h)
-                new_ann['bbox'] = [int(round(coord)) for coord in new_bbox]
+                new_ann['bbox'] = self.flip_bbox(ann['bbox'], 0, orig_w, orig_h)
             elif transform_key == 'vflip':
-                new_bbox = self.flip_bbox(bbox, 1, orig_w, orig_h)
-                new_ann['bbox'] = [int(round(coord)) for coord in new_bbox]
-
+                new_ann['bbox'] = self.flip_bbox(ann['bbox'], 1, orig_w, orig_h)
             elif transform_key == 'r90-vflip':
-                bbox = self.rotate_bbox(bbox, 90, orig_w, orig_h)
-                new_bbox = self.flip_bbox(bbox, 1, new_w, new_h)
-                new_ann['bbox'] = [int(round(coord)) for coord in new_bbox]
+                bbox = self.rotate_bbox(ann['bbox'], 90, orig_w, orig_h)
+                new_ann['bbox'] = self.flip_bbox(bbox, 1, new_w, new_h)
             elif transform_key == 'r90-hflip':
-                bbox = self.rotate_bbox(bbox, 90, orig_w, orig_h)
-                new_bbox = self.flip_bbox(bbox, 0, new_w, new_h)
-                new_ann['bbox'] = [int(round(coord)) for coord in new_bbox]
+                bbox = self.rotate_bbox(ann['bbox'], 90, orig_w, orig_h)
+                new_ann['bbox'] = self.flip_bbox(bbox, 0, new_w, new_h)
             elif transform_key == 'r90-hvflip':
-                bbox = self.rotate_bbox(bbox, 90, orig_w, orig_h)
+                bbox = self.rotate_bbox(ann['bbox'], 90, orig_w, orig_h)
                 bbox = self.flip_bbox(bbox, 0, new_w, new_h)
-                new_bbox = self.flip_bbox(bbox, 1, new_w, new_h)
-                new_ann['bbox'] = [int(round(coord)) for coord in new_bbox]
+                new_ann['bbox'] = self.flip_bbox(bbox, 1, new_w, new_h)
+            else:
+                new_ann['bbox'] = [int(round(x)) for x in ann['bbox']]
+        else:
+            new_ann['bbox'] = []
 
-        # Recalculate area from bbox
-        if 'area' in new_ann and 'bbox' in new_ann:
+        # Recalculate area from bbox if possible
+        if 'bbox' in new_ann and len(new_ann['bbox']) == 4:
             _, _, w, h = new_ann['bbox']
             new_ann['area'] = int(w * h)
 
