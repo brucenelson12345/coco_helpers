@@ -25,7 +25,6 @@ class COCOAugmenter:
         annotations_file,
         output_images_dir,
         output_annotations_file,
-        # Optional augmentation settings
         rotations=None,
         horizontal_flip=False,
         vertical_flip=False,
@@ -36,22 +35,7 @@ class COCOAugmenter:
         image_extensions=None
     ):
         """
-        Initialize and sanitize COCO dataset: convert IDs to integers, validate paths.
-
-        Args:
-            images_dir (str): Path to input images folder.
-            annotations_file (str): Path to COCO annotations JSON.
-            output_images_dir (str): Output folder for augmented images.
-            output_annotations_file (str): Output path for updated COCO JSON.
-
-            rotations (list): List of rotation angles (e.g., [90, 180, 270]).
-            horizontal_flip (bool): Enable left-right flip.
-            vertical_flip (bool): Enable top-bottom flip.
-            rotate90_plus_vertical_flip (bool): Rotate 90° + vertical flip.
-            rotate90_plus_horizontal_flip (bool): Rotate 90° + horizontal flip.
-            rotate90_plus_hv_flip (bool): Rotate 90° + both flips.
-            save_original (bool): Save original as '_orig'.
-            image_extensions (list): Supported image extensions.
+        Initialize with safe ID mapping: one unique ID per image, no collisions.
         """
         # Required paths
         self.images_dir = images_dir
@@ -72,57 +56,49 @@ class COCOAugmenter:
 
         os.makedirs(self.output_images_dir, exist_ok=True)
 
-        # Load COCO data
-        if not os.path.exists(self.annotations_file):
-            raise FileNotFoundError(f"Annotations file not found: {self.annotations_file}")
-        if not os.path.exists(self.images_dir):
-            raise FileNotFoundError(f"Images directory not found: {self.images_dir}")
-
         with open(self.annotations_file, 'r') as f:
             self.coco_data = json.load(f)
 
-        # Sanitize image IDs
-        self.original_to_clean_image_id = {}
-        clean_image_id = 0
+        # === Map original image ID to a new unique sequential ID (0, 1, 2, ...) ===
+        self.orig_id_to_new_id = {}
+        for idx, img in enumerate(self.coco_data['images']):
+            # Use the original ID (string or int) as key, map to new sequential int
+            orig_id = img['id']
+            self.orig_id_to_new_id[orig_id] = idx
+
+        # Store images with new ID
         self.images = []
         for img in self.coco_data['images']:
-            original_id = img['id']
-            try:
-                clean_id = int(original_id)
-            except (ValueError, TypeError):
-                clean_id = clean_image_id
-                clean_image_id += 1
-            self.original_to_clean_image_id[original_id] = clean_id
-            img['id'] = clean_id
-            self.images.append(img)
+            new_img = {
+                'id': self.orig_id_to_new_id[img['id']],
+                'file_name': img['file_name'],
+                'width': img['width'],
+                'height': img['height']
+            }
+            self.images.append(new_img)
 
-        # Sanitize annotation IDs and fix image_id references
-        self.annotations = []
-        clean_ann_id = 0
+        # === Build anns_by_image using the new image IDs ===
         self.anns_by_image = {}
+        self.annotations = []
 
         for ann in self.coco_data['annotations']:
-            original_id = ann['id']
-            try:
-                clean_id = int(original_id)
-            except (ValueError, TypeError):
-                clean_id = clean_ann_id
-                clean_ann_id += 1
-            ann['id'] = clean_id
-
-            # Fix image_id reference
             orig_img_id = ann['image_id']
-            if orig_img_id in self.original_to_clean_image_id:
-                ann['image_id'] = self.original_to_clean_image_id[orig_img_id]
-            else:
-                try:
-                    ann['image_id'] = int(orig_img_id)
-                except (ValueError, TypeError):
-                    print(f"Warning: annotation {clean_id} has invalid image_id {orig_img_id}")
-                    continue
+            if orig_img_id not in self.orig_id_to_new_id:
+                print(f"Warning: annotation {ann['id']} references unknown image_id {orig_img_id}")
+                continue
 
-            self.annotations.append(ann)
-            self.anns_by_image.setdefault(ann['image_id'], []).append(ann)
+            new_img_id = self.orig_id_to_new_id[orig_img_id]
+            clean_ann = {
+                'id': ann['id'],
+                'image_id': new_img_id,
+                'category_id': ann['category_id'],
+                'bbox': ann['bbox'],
+                'area': ann.get('area', 0),
+                'iscrowd': ann.get('iscrowd', 0),
+                'segmentation': ann.get('segmentation', [])
+            }
+            self.annotations.append(clean_ann)
+            self.anns_by_image.setdefault(new_img_id, []).append(clean_ann)
 
         self.categories = self.coco_data['categories']
 
@@ -144,7 +120,7 @@ class COCOAugmenter:
 
         for angle in self.rotations:
             if angle not in (90, 180, 270):
-                print(f"⚠️ Skipping unsupported rotation angle: {angle}")
+                print(f"Skipping unsupported rotation angle: {angle}")
                 continue
             k = angle // 90
             key = f'r{angle}'
@@ -285,8 +261,8 @@ class COCOAugmenter:
         return new_ann
 
     def augment(self):
-        """Run full augmentation pipeline with clean IDs and integer coordinates."""
-        print("🚀 Starting COCO dataset augmentation...")
+        """Run full augmentation pipeline with correct annotation mapping."""
+        print("Starting COCO dataset augmentation...")
 
         output_images = []
         output_annotations = []
@@ -322,6 +298,7 @@ class COCOAugmenter:
             img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
             orig_h, orig_w = img_rgb.shape[:2]
 
+            # Get only annotations for this image
             img_anns = self.anns_by_image.get(img_info['id'], [])
 
             for key, transform_func in self.transforms.items():
@@ -378,8 +355,8 @@ class COCOAugmenter:
         print(f"Augmentation complete!")
         print(f"   - {len(self.output_images)} images saved to '{self.output_images_dir}'")
         print(f"   - {len(self.output_annotations)} annotations saved")
-        print(f"   - Annotation IDs: 0 to {len(self.output_annotations) - 1}")
-        print(f"   - All bbox and segmentation coordinates are integers")
+        print(f"   - Expected: {len(self.images)} × {len(self.transforms)} = {len(self.output_images)} images")
+        print(f"   - Expected: {sum(len(self.anns_by_image.get(img['id'], [])) for img in self.images)} × {len(self.transforms)} = {len(self.output_annotations)} annotations")
 
 
 if __name__ == "__main__":
