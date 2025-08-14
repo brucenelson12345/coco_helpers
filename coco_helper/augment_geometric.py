@@ -246,39 +246,42 @@ class COCOAugmenter:
         return [int(round(x)) for x in rotated.flatten().tolist()]
 
     def transform_annotation(self, ann, transform_key, orig_w, orig_h, new_w, new_h):
-        """Transform bbox and segmentation; ensure output is clean."""
+        """Transform bbox and segmentation with correct combined transforms."""
         new_ann = {
             'category_id': ann['category_id'],
             'iscrowd': ann.get('iscrowd', 0),
             'area': ann.get('area', 0)
         }
 
-        # Transform segmentation if exists
+        # Transform segmentation
         if 'segmentation' in ann and ann['segmentation']:
             segs = []
             for seg in ann['segmentation']:
-                points = np.array(seg).reshape(-1, 2).tolist()
+                points = np.array(seg).reshape(-1).tolist()
                 transformed = []
 
-                if 'r90' in transform_key or 'r180' in transform_key or 'r270' in transform_key:
-                    angle = 90 if 'r90' in transform_key else (180 if 'r180' in transform_key else 270)
-                    transformed = self.rotate_points(seg, angle, orig_w, orig_h)
+                if transform_key == 'r90':
+                    transformed = self.rotate_points(points, 90, orig_w, orig_h)
+                elif transform_key == 'r180':
+                    transformed = self.rotate_points(points, 180, orig_w, orig_h)
+                elif transform_key == 'r270':
+                    transformed = self.rotate_points(points, 270, orig_w, orig_h)
                 elif transform_key == 'hflip':
-                    transformed = self.flip_points(seg, 0, orig_w, orig_h)
+                    transformed = self.flip_points(points, 0, orig_w, orig_h)
                 elif transform_key == 'vflip':
-                    transformed = self.flip_points(seg, 1, orig_w, orig_h)
+                    transformed = self.flip_points(points, 1, orig_w, orig_h)
                 elif transform_key == 'r90-vflip':
-                    seg = self.rotate_points(seg, 90, orig_w, orig_h)
-                    transformed = self.flip_points(seg, 1, new_w, new_h)
+                    seg_rot = self.rotate_points(points, 90, orig_w, orig_h)
+                    transformed = self.flip_points(seg_rot, 1, new_w, new_h)
                 elif transform_key == 'r90-hflip':
-                    seg = self.rotate_points(seg, 90, orig_w, orig_h)
-                    transformed = self.flip_points(seg, 0, new_w, new_h)
+                    seg_rot = self.rotate_points(points, 90, orig_w, orig_h)
+                    transformed = self.flip_points(seg_rot, 0, new_w, new_h)
                 elif transform_key == 'r90-hvflip':
-                    seg = self.rotate_points(seg, 90, orig_w, orig_h)
-                    seg = self.flip_points(seg, 0, new_w, new_h)
-                    transformed = self.flip_points(seg, 1, new_w, new_h)
-                else:  # orig
-                    transformed = [int(round(x)) for x in seg]
+                    seg_rot = self.rotate_points(points, 90, orig_w, orig_h)
+                    seg_hflip = self.flip_points(seg_rot, 0, new_w, new_h)
+                    transformed = self.flip_points(seg_hflip, 1, new_w, new_h)
+                else:  # 'orig'
+                    transformed = [int(round(x)) for x in points]
 
                 segs.append(transformed)
             new_ann['segmentation'] = segs
@@ -288,29 +291,32 @@ class COCOAugmenter:
         # Transform bbox
         if 'bbox' in ann and ann['bbox']:
             x, y, w, h = ann['bbox']
-            if 'r90' in transform_key or 'r180' in transform_key or 'r270' in transform_key:
-                angle = 90 if 'r90' in transform_key else (180 if 'r180' in transform_key else 270)
-                new_ann['bbox'] = self.rotate_bbox(ann['bbox'], angle, orig_w, orig_h)
+            if transform_key == 'r90':
+                new_ann['bbox'] = self.rotate_bbox(ann['bbox'], 90, orig_w, orig_h)
+            elif transform_key == 'r180':
+                new_ann['bbox'] = self.rotate_bbox(ann['bbox'], 180, orig_w, orig_h)
+            elif transform_key == 'r270':
+                new_ann['bbox'] = self.rotate_bbox(ann['bbox'], 270, orig_w, orig_h)
             elif transform_key == 'hflip':
                 new_ann['bbox'] = self.flip_bbox(ann['bbox'], 0, orig_w, orig_h)
             elif transform_key == 'vflip':
                 new_ann['bbox'] = self.flip_bbox(ann['bbox'], 1, orig_w, orig_h)
             elif transform_key == 'r90-vflip':
-                bbox = self.rotate_bbox(ann['bbox'], 90, orig_w, orig_h)
-                new_ann['bbox'] = self.flip_bbox(bbox, 1, new_w, new_h)
+                bbox_rot = self.rotate_bbox(ann['bbox'], 90, orig_w, orig_h)
+                new_ann['bbox'] = self.flip_bbox(bbox_rot, 1, new_w, new_h)
             elif transform_key == 'r90-hflip':
-                bbox = self.rotate_bbox(ann['bbox'], 90, orig_w, orig_h)
-                new_ann['bbox'] = self.flip_bbox(bbox, 0, new_w, new_h)
+                bbox_rot = self.rotate_bbox(ann['bbox'], 90, orig_w, orig_h)
+                new_ann['bbox'] = self.flip_bbox(bbox_rot, 0, new_w, new_h)
             elif transform_key == 'r90-hvflip':
-                bbox = self.rotate_bbox(ann['bbox'], 90, orig_w, orig_h)
-                bbox = self.flip_bbox(bbox, 0, new_w, new_h)
-                new_ann['bbox'] = self.flip_bbox(bbox, 1, new_w, new_h)
-            else:
-                new_ann['bbox'] = [int(round(x)) for x in ann['bbox']]
+                bbox_rot = self.rotate_bbox(ann['bbox'], 90, orig_w, orig_h)
+                bbox_hflip = self.flip_bbox(bbox_rot, 0, new_w, new_h)
+                new_ann['bbox'] = self.flip_bbox(bbox_hflip, 1, new_w, new_h)
+            else:  # 'orig'
+                new_ann['bbox'] = [int(round(x)) for x in [x, y, w, h]]
         else:
             new_ann['bbox'] = []
 
-        # Recalculate area from bbox if possible
+        # Recalculate area
         if 'bbox' in new_ann and len(new_ann['bbox']) == 4:
             _, _, w, h = new_ann['bbox']
             new_ann['area'] = int(w * h)

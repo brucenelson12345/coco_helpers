@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import os
 import json
 import cv2
@@ -12,7 +11,9 @@ from typing import Dict, Tuple, Optional
 class COCOBBoxDrawer:
     """
     A class to draw bounding boxes on images based on COCO annotations.
-    Each category gets a unique color. Bounding boxes are semi-transparent filled.
+    - Each category has a unique color.
+    - Bounding boxes are semi-transparent filled.
+    - Labels are intelligently placed to avoid image borders.
     """
 
     def __init__(
@@ -71,7 +72,7 @@ class COCOBBoxDrawer:
         return self.color_cache[category_id]
 
     def draw(self):
-        """Draw bounding boxes with category-specific colors and transparency."""
+        """Draw bounding boxes with category-specific colors and smart label placement."""
         Path(self.output_dir).mkdir(parents=True, exist_ok=True)
 
         # Load COCO annotations
@@ -112,11 +113,18 @@ class COCOBBoxDrawer:
                 continue
 
             overlay = image.copy()  # For transparent fills
+            img_h, img_w = image.shape[:2]
 
             for ann in anns:
                 x, y, w, h = map(int, ann['bbox'])
-                x1, y1 = x, y
-                x2, y2 = x + w, y + h
+                x1 = max(0, x)
+                y1 = max(0, y)
+                x2 = min(img_w, x + w)
+                y2 = min(img_h, y + h)
+
+                # Skip invalid boxes
+                if x1 >= x2 or y1 >= y2:
+                    continue
 
                 category_id = ann['category_id']
                 class_name = self.class_names.get(category_id, f"Class {category_id}")
@@ -128,19 +136,59 @@ class COCOBBoxDrawer:
                 # Draw solid border
                 cv2.rectangle(image, (x1, y1), (x2, y2), color, self.thickness)
 
-                # Draw label with black background and white text
+                # Draw label with smart placement
                 if self.draw_labels:
                     label = f"{class_name}"
                     (text_width, text_height), _ = cv2.getTextSize(
                         label, cv2.FONT_HERSHEY_SIMPLEX, self.font_scale, 1
                     )
-                    # Black background
-                    cv2.rectangle(image, (x1, y1 - text_height - 10),
-                                (x1 + text_width, y1), (0, 0, 0), -1)
-                    # White text
-                    cv2.putText(image, label, (x1, y1 - 5),
-                              cv2.FONT_HERSHEY_SIMPLEX, self.font_scale,
-                              (255, 255, 255), 1)
+                    text_height += 5  # Add padding
+                    margin = 10  # Minimum margin from image edge
+
+                    # Try placing above the box
+                    if y1 - text_height - margin > 0:
+                        label_x = x1
+                        label_y_top = y1 - 10
+                        label_y_bottom = y1
+                        cv2.rectangle(image, (label_x, label_y_top - text_height),
+                                    (label_x + text_width, label_y_bottom), (0, 0, 0), -1)
+                        cv2.putText(image, label, (label_x, label_y_bottom - 5),
+                                  cv2.FONT_HERSHEY_SIMPLEX, self.font_scale,
+                                  (255, 255, 255), 1)
+
+                    # Try placing inside the box (bottom-left)
+                    elif y2 + text_height < img_h or x1 + text_width < img_w:
+                        label_x = x1 + 2
+                        label_y_bottom = y2 - 2
+                        label_y_top = label_y_bottom - text_height
+                        if label_y_top >= 0:
+                            cv2.rectangle(image, (label_x, label_y_top),
+                                        (label_x + text_width, label_y_bottom + 5),
+                                        (0, 0, 0), -1)
+                            cv2.putText(image, label, (label_x, label_y_bottom),
+                                      cv2.FONT_HERSHEY_SIMPLEX, self.font_scale,
+                                      (255, 255, 255), 1)
+
+                    # Try placing below the box
+                    elif y2 + text_height + margin < img_h:
+                        label_x = x1
+                        label_y_top = y2
+                        label_y_bottom = y2 + text_height + 5
+                        cv2.rectangle(image, (label_x, label_y_top),
+                                    (label_x + text_width, label_y_bottom),
+                                    (0, 0, 0), -1)
+                        cv2.putText(image, label, (label_x, label_y_bottom),
+                                  cv2.FONT_HERSHEY_SIMPLEX, self.font_scale,
+                                  (255, 255, 255), 1)
+
+                    # Last resort: place at top-left of image if nothing else fits
+                    else:
+                        cv2.rectangle(image, (margin, margin),
+                                    (margin + text_width, margin + text_height + 5),
+                                    (0, 0, 0), -1)
+                        cv2.putText(image, label, (margin, margin + text_height),
+                                  cv2.FONT_HERSHEY_SIMPLEX, self.font_scale,
+                                  (255, 255, 255), 1)
 
             # Apply overlay (semi-transparent filled boxes)
             cv2.addWeighted(overlay, self.alpha, image, 1 - self.alpha, 0, image)
@@ -186,7 +234,7 @@ if __name__ == "__main__":
         'draw_labels': config.get('draw_labels', True),
         'thickness': config.get('thickness', 2),
         'font_scale': config.get('font_scale', 0.6),
-        'alpha': config.get('alpha', 0.3),  # Transparency
+        'alpha': config.get('alpha', 0.3),
         'class_names': config.get('class_names', None)
     }
 
