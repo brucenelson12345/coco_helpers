@@ -6,6 +6,7 @@ import argparse
 import random
 from pathlib import Path
 from typing import Dict, Tuple, Optional
+from tqdm import tqdm
 
 
 class COCOBBoxDrawer:
@@ -95,24 +96,25 @@ class COCOBBoxDrawer:
 
         processed_count = 0
 
-        for img_id, anns in annotations_by_image.items():
+        items = list(annotations_by_image.items())
+        for img_id, anns in tqdm(items, desc="Processing images", unit="image"):
             if img_id not in image_id_to_filename:
-                print(f"Warning: Image ID {img_id} not found in images list. Skipping.")
+                tqdm.write(f"Warning: Image ID {img_id} not found in images list. Skipping.")
                 continue
 
             img_filename = image_id_to_filename[img_id]
             img_path = os.path.join(self.image_dir, img_filename)
 
             if not os.path.exists(img_path):
-                print(f"Warning: Image not found: {img_path}. Skipping.")
+                tqdm.write(f"Warning: Image not found: {img_path}. Skipping.")
                 continue
 
             image = cv2.imread(img_path)
             if image is None:
-                print(f"Warning: Failed to load image: {img_path}. Skipping.")
+                tqdm.write(f"Warning: Failed to load image: {img_path}. Skipping.")
                 continue
 
-            overlay = image.copy()  # For transparent fills
+            overlay = image.copy()
             img_h, img_w = image.shape[:2]
 
             for ann in anns:
@@ -142,8 +144,8 @@ class COCOBBoxDrawer:
                     (text_width, text_height), _ = cv2.getTextSize(
                         label, cv2.FONT_HERSHEY_SIMPLEX, self.font_scale, 1
                     )
-                    text_height += 5  # Add padding
-                    margin = 10  # Minimum margin from image edge
+                    text_height += 5
+                    margin = 10
 
                     # Try placing above the box
                     if y1 - text_height - margin > 0:
@@ -181,7 +183,7 @@ class COCOBBoxDrawer:
                                   cv2.FONT_HERSHEY_SIMPLEX, self.font_scale,
                                   (255, 255, 255), 1)
 
-                    # Last resort: place at top-left of image if nothing else fits
+                    # Last resort: top-left corner
                     else:
                         cv2.rectangle(image, (margin, margin),
                                     (margin + text_width, margin + text_height + 5),
@@ -190,7 +192,7 @@ class COCOBBoxDrawer:
                                   cv2.FONT_HERSHEY_SIMPLEX, self.font_scale,
                                   (255, 255, 255), 1)
 
-            # Apply overlay (semi-transparent filled boxes)
+            # Apply overlay
             cv2.addWeighted(overlay, self.alpha, image, 1 - self.alpha, 0, image)
 
             # Save image
@@ -199,13 +201,12 @@ class COCOBBoxDrawer:
 
             success = cv2.imwrite(output_path, image)
             if not success:
-                print(f"Warning: Could not save image: {output_path}")
+                tqdm.write(f"Warning: Could not save image: {output_path}")
             else:
                 processed_count += 1
 
         print(f"Successfully processed and saved {processed_count} annotated images to: {self.output_dir}")
         print(f"Used {len(self.color_cache)} unique colors for categories.")
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
