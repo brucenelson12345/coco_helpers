@@ -1,0 +1,89 @@
+def print_summary(self):
+    """Print final statistics: group counts, category presence, and annotation counts."""
+    print("\n" + "=" * 60)
+    print("✅ FINAL SPLIT SUMMARY")
+    print("=" * 60)
+
+    # --- Image and Group Counts ---
+    total_train_imgs = sum(len(self.group_idx_to_group[i]) for i in self.train_groups)
+    total_val_imgs = sum(len(self.group_idx_to_group[i]) for i in self.val_groups)
+    total_test_imgs = sum(len(self.group_idx_to_group[i]) for i in self.test_groups)
+
+    print(f"Train: {len(self.train_groups)} groups → {total_train_imgs} images")
+    print(f"Val:   {len(self.val_groups)} groups → {total_val_imgs} images")
+    print(f"Test:  {len(self.test_groups)} groups → {total_test_imgs} images")
+
+    # --- Category Presence (Group-Level) ---
+    train_cats = set().union(*(self.group_to_cats[i] for i in self.train_groups))
+    val_cats = set().union(*(self.group_to_cats[i] for i in self.val_groups))
+    test_cats = set().union(*(self.group_to_cats[i] for i in self.test_groups))
+    all_cats = set(self.cat_id_to_name.keys())
+    missing = all_cats - (train_cats & val_cats & test_cats)
+
+    if missing:
+        names = [self.cat_id_to_name[c] for c in missing]
+        print(f"❌ Missing in all splits: {names}")
+    else:
+        print("✅ All categories present in train, val, and test.")
+
+    print("\n📊 1. Category Distribution (by GROUP presence)")
+    print("   → Each group counts as 1 per category it contains")
+    print(f"{'Class':<15} {'Train':<6} {'Val':<6} {'Test':<6}")
+    print("-" * 35)
+    for cat_id, name in sorted(self.cat_id_to_name.items()):
+        tr = self.cat_counts['train'][cat_id]
+        va = self.cat_counts['val'][cat_id]
+        te = self.cat_counts['test'][cat_id]
+        print(f"{name:<15} {tr:<6} {va:<6} {te:<6}")
+
+    # --- Annotation-Level Counts ---
+    def count_anns_per_split():
+        """Count actual number of annotations per category per split."""
+        counts = {
+            'train': Counter(),
+            'val': Counter(),
+            'test': Counter()
+        }
+        split_map = {
+            'train': self.train_groups,
+            'val': self.val_groups,
+            'test': self.test_groups
+        }
+
+        for split, group_indices in split_map.items():
+            for idx in group_indices:
+                group = self.group_idx_to_group[idx]
+                img_ids = {img['id'] for img in group}
+                for img_id in img_ids:
+                    for ann in self.image_id_to_anns[img_id]:
+                        cat_id = ann['category_id']
+                        counts[split][cat_id] += 1  # One annotation
+        return counts
+
+    ann_counts = count_anns_per_split()
+
+    print("\n📈 2. Annotation Count per Category (exact)")
+    print("   → Total annotations should sum to original dataset count")
+    print(f"{'Class':<15} {'Train':<6} {'Val':<6} {'Test':<6} {'Total':<6}")
+    print("-" * 45)
+    total_anns = 0
+    total_per_split = {'train': 0, 'val': 0, 'test': 0}
+    for cat_id, name in sorted(self.cat_id_to_name.items()):
+        tr = ann_counts['train'][cat_id]
+        va = ann_counts['val'][cat_id]
+        te = ann_counts['test'][cat_id]
+        tot = tr + va + te
+        total_anns += tot
+        for k, v in [('train', tr), ('val', va), ('test', te)]:
+            total_per_split[k] += v
+        print(f"{name:<15} {tr:<6} {va:<6} {te:<6} {tot:<6}")
+
+    print("-" * 45)
+    print(f"{'TOTAL':<15} {total_per_split['train']:<6} "
+          f"{total_per_split['val']:<6} {total_per_split['test']:<6} {total_anns:<6}")
+
+    # Final check
+    if total_anns == sum(len(self.image_id_to_anns[img_id]) for img_id in self.image_id_to_anns):
+        print(f"✅ Annotation count verified: {total_anns} annotations preserved.")
+    else:
+        print(f"❌ Mismatch! Expected {sum(len(self.image_id_to_anns[img_id]) for img_id in self.image_id_to_anns)}, got {total_anns}")
