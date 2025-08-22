@@ -1,0 +1,74 @@
+def ensure_category_coverage(self):
+    """
+    Ensure each category appears in train, val, and test by reserving one group per category per split.
+    When a group is assigned, ALL its categories are marked as present in that split.
+    """
+    print("Phase 1: Ensuring category coverage in all splits...")
+    all_cat_ids = set(self.cat_id_to_name.keys())
+
+    # We'll track which categories are already covered in each split
+    covered_train = set()
+    covered_val = set()
+    covered_test = set()
+
+    # We'll assign groups one at a time, updating all categories in the group
+    for cat_id in all_cat_ids:
+        candidates = self.cat_to_candidate_groups[cat_id]
+
+        # --- Try to assign to train ---
+        if cat_id not in covered_train:
+            assigned = False
+            for idx, _ in candidates:
+                if idx not in self.assigned_groups:
+                    # Assign group to train
+                    self.train_groups.add(idx)
+                    self.assigned_groups.add(idx)
+                    # Increment count for ALL categories in this group
+                    for c in self.group_to_cats[idx]:
+                        self.cat_counts['train'][c] += 1
+                    covered_train.update(self.group_to_cats[idx])  # Mark all cats as covered
+                    assigned = True
+                    print(f"  Assigned group {idx} to train (covers: {self.group_to_cats[idx]})")
+                    break
+            if not assigned:
+                print(f"⚠️ Could not assign any group with category {cat_id} to train")
+
+        # --- Try to assign to val ---
+        if cat_id not in covered_val:
+            assigned = False
+            for idx, _ in candidates:
+                if idx not in self.assigned_groups:
+                    self.val_groups.add(idx)
+                    self.assigned_groups.add(idx)
+                    for c in self.group_to_cats[idx]:
+                        self.cat_counts['val'][c] += 1
+                    covered_val.update(self.group_to_cats[idx])
+                    assigned = True
+                    print(f"  Assigned group {idx} to val (covers: {self.group_to_cats[idx]})")
+                    break
+            if not assigned:
+                print(f"⚠️ Could not assign any group with category {cat_id} to val")
+
+        # --- Try to assign to test ---
+        if cat_id not in covered_test:
+            assigned = False
+            for idx, _ in candidates:
+                if idx not in self.assigned_groups:
+                    self.test_groups.add(idx)
+                    self.assigned_groups.add(idx)
+                    for c in self.group_to_cats[idx]:
+                        self.cat_counts['test'][c] += 1
+                    covered_test.update(self.group_to_cats[idx])
+                    assigned = True
+                    print(f"  Assigned group {idx} to test (covers: {self.group_to_cats[idx]})")
+                    break
+            if not assigned:
+                print(f"⚠️ Could not assign any group with category {cat_id} to test")
+
+    # Final coverage check
+    missing = all_cat_ids - (covered_train & covered_val & covered_test)
+    if missing:
+        names = [self.cat_id_to_name[c] for c in missing]
+        print(f"❌ After Phase 1, these categories are missing in at least one split: {names}")
+    else:
+        print("✅ Phase 1: All categories now covered in train, val, and test.")
