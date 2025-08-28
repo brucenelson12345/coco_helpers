@@ -1,0 +1,190 @@
+import cv2
+import torch
+import numpy as np
+from torchvision import models, transforms
+from sklearn.metrics.pairwise import cosine_similarity
+import os
+
+# -------------------------------
+# Configuration
+# -------------------------------
+KNOWN_CLASSES = ['sports ball', 'baseball', 'tennis ball', 'soccer ball', 'basketball']
+# Note: YOLOv8 COCO has 'sports ball' — adjust based on your custom model
+CONFIDENCE_THRESHOLD = 0.5
+SIMILARITY_THRESHOLD = 0.7  # If max similarity < this → unknown
+IMG_SIZE = (224, 224)
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+# Path to sample images of known balls (for building reference embeddings)
+# You can replace this with real training images or let it build dynamically
+KNOWN_IMAGES_DIR = "known_balls"  # Put sample images of balls here (optional)
+
+# -------------------------------
+# Load YOLO Model (YOLOv8)
+# -------------------------------
+from ultralytics import YOLO
+yolo_model = YOLO('yolov8n.pt')  # Or use your custom trained model
+
+# -------------------------------
+# Load Feature Extractor (ResNet18)
+# -------------------------------
+class FeatureExtractor:
+    def __init__(self):
+        self.model = models.resnet18(pretrained=True)
+        self.model.fc = torch.nn.Identity()
+        self.model.eval()
+        self.model.to(DEVICE)
+
+        self.transform = transforms.Compose([
+            transforms.ToPILImage(),
+            transforms.Resize(IMG_SIZE),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+
+    def extract(self, image):
+        """Extract embedding from a cropped image"""
+        if len(image.shape) == 2:  # Grayscale
+            image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        tensor = self.transform(image).unsqueeze(0).to(DEVICE)
+        with torch.no_grad():
+            embedding = self.model(tensor)
+        return embedding.cpu().numpy().flatten()
+
+extractor = FeatureExtractor()
+
+# -------------------------------
+# Build Reference Embeddings
+# -------------------------------
+reference_embeddings = []
+
+def build_reference_embeddings():
+    """Build embeddings from known ball images (directory)"""
+    if not os.path.exists(KNOWN_IMAGES_DIR):
+        print(f"[INFO] {KNOWN_IMAGES_DIR} not found. Using detections to build references dynamically.")
+        return False
+
+    for fname in os.listdir(KNOWN_IMAGES_DIR):
+        path = os.path.join(KNOWN_IMAGES_DIR, fname)
+        img = cv2.imread(path)
+        if img is None:
+            continue
+        emb = extractor.extract(img)
+        reference_embeddings.append(emb)
+    print(f"[INFO] Built reference database with {len(reference_embeddings)} known ball embeddings.")
+    return True
+
+# Try to load reference images
+use_prebuilt_refs = build_reference_embeddings()
+
+# -------------------------------
+# Main Detection & Unknown Labeling
+# -------------------------------
+def classify_with_unknown(image):
+    """
+    Detect objects and label known balls or 'unknown_ball'
+    """
+    results = yolo_model(image)
+    detections = results[0].boxes
+
+    # Store embeddings from current frame if no prebuilt refs
+    current_frame_embeddings = []
+
+    output_img = image.copy()
+
+    for box, conf, cls in zip(detections.xyxy, detections.conf, detections.cls):
+        x1, y1, x2, y2 = map(int, box.tolist())
+        confidence = conf.item()
+        class_id = int(cls.item())
+        label_name = yolo_model.names[class_id]
+
+        crop = image[y1:y2, x1:x2]
+        if crop.size == 0:
+            continue
+
+        # Extract embedding for this crop
+        try:
+            emb = extractor.extract(crop)
+        except Exception as e:
+            print(f"Error extracting features: {e}")
+            continue
+
+        current_frame_embeddings.append(emb)
+
+        # -------------------------------
+        # Decision Logic
+        # -------------------------------
+        is_known = False
+
+        # Rule 1: High confidence + known class
+        if confidence > CONFIDENCE_THRESHOLD and label_name.lower() in [k.lower() for k in KNOWN_CLASSES]:
+            is_known = True
+            final_label = label_name
+            color = (0, 255, 0)  # Green
+
+        # Rule 2: Check similarity to known embeddings
+        else:
+            max_sim = 0.0
+            if reference_embeddings:
+                sims = cosine_similarity([emb], reference_embeddings)
+                max_sim = sims.max()
+
+            # If we have no reference DB, use embeddings from high-confidence knowns in this frame
+            elif use_prebuilt_refs is False and len(current_frame_embeddings) > 1:
+                # Use only embeddings already confirmed as known (you'd need tracking or logic)
+                pass  # Simplified: skip and default to unknown
+
+            if max_sim >= SIMILARITY_THRESHOLD:
+                final_label = label_name  # Possibly misclassified known
+                color = (255, 165, 0)  # Orange
+            else:
+                final_label = f"unknown_ball ({label_name})"
+                color = (0, 0, 255)  # Red
+
+        # Always draw bounding box
+        cv2.rectangle(output_img, (x1, y1), (x2, y2), color, 2)
+        cv2.putText(output_img, f"{final_label} {confidence:.2f}", (x1, y1 - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+
+    # Optional: Update reference embeddings from high-confidence knowns in this frame
+    # (Advanced: use tracking + filtering)
+
+    return output_img
+
+# -------------------------------
+# Run on Image or Webcam
+# -------------------------------
+if __name__ == "__main__":
+    # Option 1: From image file
+    # img_path = "test.jpg"
+    # image = cv2.imread(img_path)
+    # if image is None:
+    #     print("Image not found!")
+    #     exit()
+
+    # result = classify_with_unknown(image)
+    # cv2.imshow("Detection", result)
+    # cv2.waitKey(0)
+    # cv2.destroyAllWindows()
+
+    # Option 2: From webcam
+    cap = cv2.VideoCapture(0)  # Change index if needed
+    if not cap.isOpened():
+        print("Cannot open camera")
+        exit()
+
+    print("Press 'q' to quit.")
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        result_frame = classify_with_unknown(frame)
+        cv2.imshow("Unknown Object Detection", result_frame)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()

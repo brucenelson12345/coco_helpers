@@ -1,0 +1,26 @@
+project/
+│
+├── detector.py              <-- This script
+├── known_balls/             <-- Optional: sample images of known balls
+│   ├── soccer_ball_1.jpg
+│   ├── tennis_ball_1.jpg
+│   └── basketball_1.jpg
+└── test.jpg                 <-- Test image
+
+
+ Tips for Improvement
+Use a custom YOLO model trained on your 4 ball types → better confidence.
+Add object tracking (e.g., ByteTrack) to build reference embeddings from confirmed knowns in video.
+Cluster unknowns over time to discover new classes (e.g., "Type A unknown", "Type B").
+Use better backbones: ResNet50, ViT, or CLIP for stronger embeddings.
+✅ Example Output
+Soccer ball → "soccer_ball 0.89" (green)
+Volleyball (untrained) → "unknown_ball (sports ball)" (red)
+Blurry tennis ball → "unknown_ball (tennis ball)" if low similarity
+Let me know if you want:
+
+Video file input version
+Unknown clustering over time
+Integration with CLIP for zero-shot labeling (e.g., "oval-shaped ball")
+Saving unknown detections for retraining
+Happy detecting!
