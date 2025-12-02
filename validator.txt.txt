@@ -1,0 +1,211 @@
+from ultralytics import YOLO
+import numpy as np
+import pandas as pd
+from collections import defaultdict
+from pathlib import Path
+import json
+
+class MAPGroupAnalyzer:
+    def __init__(self, model_path):
+        self.model_path = model_path
+        self.model = YOLO(model_path)
+        self.categories = self._get_categories()
+        self.results = None
+        self.json_data = None
+        
+    def _get_categories(self):
+        """Get category names from model"""
+        if hasattr(self.model, 'names') and self.model.names:
+            return list(self.model.names.values())
+        elif hasattr(self.model.model, 'names'):
+            return self.model.model.names
+        else:
+            raise ValueError("Could not find category names in model")
+    
+    def validate(self, **kwargs):
+        """Run validation and capture results"""
+        # Set default kwargs
+        default_kwargs = {
+            'save_json': True,
+            'conf': 0.001,
+            'iou': 0.6,
+            'project': 'runs/val',
+            'name': 'map_group_analysis',
+            'exist_ok': True
+        }
+        default_kwargs.update(kwargs)
+        
+        self.results = self.model.val(**default_kwargs)
+        
+        # Try to load JSON results
+        results_dir = Path(default_kwargs['project']) / default_kwargs['name']
+        json_files = list(results_dir.glob('*.json'))
+        
+        if json_files:
+            with open(json_files[0], 'r') as f:
+                self.json_data = json.load(f)
+        
+        return self
+    
+    def get_per_class_metrics(self):
+        """Extract per-class metrics from results"""
+        if self.json_data:
+            # Get from JSON (most reliable)
+            metrics = self.json_data.get('metrics', {})
+            ap_class_index = metrics.get('ap_class_index', [])
+            ap50 = metrics.get('ap50', [])
+            ap = metrics.get('ap', [])
+        elif self.results and hasattr(self.results, 'box'):
+            # Try to get from results object
+            if (hasattr(self.results.box, 'ap_class_index') and
+                hasattr(self.results.box, 'ap50') and
+                hasattr(self.results.box, 'ap')):
+                ap_class_index = self.results.box.ap_class_index
+                ap50 = self.results.box.ap50
+                ap = self.results.box.ap
+            else:
+                raise ValueError("Per-class metrics not available in results")
+        else:
+            raise ValueError("No validation results available")
+        
+        # Create mapping
+        class_metrics = {}
+        for i, class_idx in enumerate(ap_class_index):
+            if i < len(ap50) and i < len(ap):
+                class_metrics[class_idx] = {
+                    'map50': float(ap50[i]),
+                    'map50_95': float(ap[i])
+                }
+        
+        return class_metrics
+    
+    def analyze_groups(self):
+        """Analyze mAP scores grouped by prefix"""
+        class_metrics = self.get_per_class_metrics()
+        
+        # Group by prefix
+        groups = defaultdict(lambda: {
+            'map50': [],
+            'map50_95': [],
+            'count': 0,
+            'categories': [],
+            'class_indices': []
+        })
+        
+        for class_idx in sorted(class_metrics.keys()):
+            if class_idx < len(self.categories):
+                category = self.categories[class_idx]
+                prefix = category.split('_')[0] if '_' in category else category
+                
+                groups[prefix]['map50'].append(class_metrics[class_idx]['map50'])
+                groups[prefix]['map50_95'].append(class_metrics[class_idx]['map50_95'])
+                groups[prefix]['count'] += 1
+                groups[prefix]['categories'].append(category)
+                groups[prefix]['class_indices'].append(class_idx)
+        
+        # Calculate statistics
+        group_stats = {}
+        for prefix, data in groups.items():
+            if data['map50']:
+                group_stats[prefix] = {
+                    'num_classes': data['count'],
+                    'categories': data['categories'],
+                    'class_indices': data['class_indices'],
+                    'map50_mean': np.mean(data['map50']),
+                    'map50_std': np.std(data['map50']),
+                    'map50_min': np.min(data['map50']),
+                    'map50_max': np.max(data['map50']),
+                    'map50_95_mean': np.mean(data['map50_95']),
+                    'map50_95_std': np.std(data['map50_95']),
+                    'map50_95_min': np.min(data['map50_95']),
+                    'map50_95_max': np.max(data['map50_95']),
+                    'individual_scores': {
+                        cat: {'map50': m50, 'map50_95': m95}
+                        for cat, m50, m95 in zip(
+                            data['categories'],
+                            data['map50'],
+                            data['map50_95']
+                        )
+                    }
+                }
+        
+        # Add overall stats
+        all_map50 = [class_metrics[idx]['map50'] for idx in sorted(class_metrics.keys())]
+        all_map50_95 = [class_metrics[idx]['map50_95'] for idx in sorted(class_metrics.keys())]
+        
+        group_stats['all'] = {
+            'num_classes': len(all_map50),
+            'categories': self.categories,
+            'map50_mean': np.mean(all_map50),
+            'map50_std': np.std(all_map50),
+            'map50_min': np.min(all_map50),
+            'map50_max': np.max(all_map50),
+            'map50_95_mean': np.mean(all_map50_95),
+            'map50_95_std': np.std(all_map50_95),
+            'map50_95_min': np.min(all_map50_95),
+            'map50_95_max': np.max(all_map50_95)
+        }
+        
+        return group_stats
+    
+    def print_report(self, save_csv=None):
+        """Print formatted report and optionally save to CSV"""
+        stats = self.analyze_groups()
+        
+        print("\n" + "="*80)
+        print("AUTOMATIC GROUPED mAP ANALYSIS")
+        print("="*80)
+        
+        # Create DataFrame for CSV
+        csv_data = []
+        
+        # Print group results (excluding 'all')
+        for prefix, data in sorted(stats.items()):
+            if prefix != 'all':
+                print(f"\n{prefix.upper()} ({data['num_classes']} classes):")
+                print(f"  mAP50:     {data['map50_mean']:.4f} ± {data['map50_std']:.4f}")
+                print(f"            Range: {data['map50_min']:.4f} - {data['map50_max']:.4f}")
+                print(f"  mAP50-95:  {data['map50_95_mean']:.4f} ± {data['map50_95_std']:.4f}")
+                print(f"            Range: {data['map50_95_min']:.4f} - {data['map50_95_max']:.4f}")
+                
+                csv_data.append({
+                    'Group': prefix,
+                    'Num_Classes': data['num_classes'],
+                    'mAP50_Mean': data['map50_mean'],
+                    'mAP50_Std': data['map50_std'],
+                    'mAP50_Min': data['map50_min'],
+                    'mAP50_Max': data['map50_max'],
+                    'mAP50-95_Mean': data['map50_95_mean'],
+                    'mAP50-95_Std': data['map50_95_std'],
+                    'mAP50-95_Min': data['map50_95_min'],
+                    'mAP50-95_Max': data['map50_95_max'],
+                    'Categories': ';'.join(data['categories'])
+                })
+        
+        # Print overall
+        if 'all' in stats:
+            all_data = stats['all']
+            print(f"\n{'='*80}")
+            print(f"OVERALL ({all_data['num_classes']} classes):")
+            print(f"  mAP50:     {all_data['map50_mean']:.4f}")
+            print(f"  mAP50-95:  {all_data['map50_95_mean']:.4f}")
+        
+        # Save to CSV
+        if save_csv:
+            df = pd.DataFrame(csv_data)
+            df.to_csv(save_csv, index=False)
+            print(f"\nResults saved to: {save_csv}")
+        
+        return stats
+
+# Usage Example
+analyzer = MAPGroupAnalyzer("path/to/your/model.pt")
+
+# Run validation
+analyzer.validate()
+
+# Get and print report
+stats = analyzer.print_report(save_csv="grouped_map_results.csv")
+
+# You can also access the raw data
+print(f"\nTotal classes analyzed: {stats['all']['num_classes']}")
