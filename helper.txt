@@ -1,0 +1,247 @@
+Okay, I've updated the script according to your specifications. It now expects a single input directory containing the Edge Impulse project structure (with `training` and/or `testing` image folders, and the `info.labels` JSON file). It will create separate COCO datasets for training and validation based on the image categories found in the `info.labels` file.
+
+```python
+import json
+import os
+import shutil
+from pathlib import Path
+
+# Import tqdm for the progress bar
+try:
+    from tqdm import tqdm
+except ImportError:
+    print("tqdm not found. Please install it using 'pip install tqdm' for progress bars.")
+    tqdm = None # Define tqdm as None if not available
+
+
+def convert_edge_impulse_dir_to_coco(input_dir):
+    """
+    Converts an Edge Impulse project directory to separate COCO format datasets for training and validation.
+
+    Args:
+        input_dir (str or Path): Path to the Edge Impulse project directory.
+    """
+    input_dir = Path(input_dir)
+
+    # Locate the info.labels file
+    info_labels_file = input_dir / "info.labels"
+    if not info_labels_file.exists():
+        raise FileNotFoundError(f"'info.labels' file not found in {input_dir}")
+
+    # Locate potential image directories
+    training_dir = input_dir / "training"
+    testing_dir = input_dir / "testing"
+    
+    # Determine which directories exist
+    source_dirs = {}
+    if training_dir.is_dir():
+        source_dirs["training"] = training_dir
+    if testing_dir.is_dir():
+        source_dirs["testing"] = testing_dir
+    
+    if not source_dirs:
+        raise ValueError(f"No 'training' or 'testing' directories found in {input_dir}")
+
+    # Load the Edge Impulse JSON data from info.labels
+    with open(info_labels_file, 'r') as f:
+        ei_data = json.load(f)
+
+    # Prepare data for processing: group files by their intended category
+    categorized_files = {"training": [], "validation": []}
+    for file_entry in ei_data.get("files", []):
+        category = file_entry.get("category") # Expected to be "training" or "testing"
+        # Map "testing" category from EI to "validation" for COCO standard
+        coco_category = "validation" if category == "testing" else "training" 
+        categorized_files[coco_category].append(file_entry)
+
+
+    # Process each category (training, validation)
+    for coco_set_name, set_files in categorized_files.items():
+        if not set_files:
+            print(f"No files found for '{coco_set_name}' set, skipping...")
+            continue
+
+        # Determine the source image directory for this set
+        ei_category_key = "testing" if coco_set_name == "validation" else "training"
+        if ei_category_key not in source_dirs:
+             print(f"Expected source directory for '{ei_category_key}' ({coco_set_name}) not found, skipping this set...")
+             continue
+        
+        source_images_dir = source_dirs[ei_category_key]
+        print(f"Processing '{coco_set_name}' set from {source_images_dir}...")
+
+        # Determine output directory name based on COCO convention
+        output_set_name = "train" if coco_set_name == "training" else "val"
+        output_dir = input_dir / f"{output_set_name}_coco"
+        output_images_dir = output_dir / "images"
+        output_dir.mkdir(exist_ok=True)
+        output_images_dir.mkdir(exist_ok=True)
+
+        # Initialize COCO format structures for this set
+        coco_dataset = {
+            "info": {
+                "description": f"COCO format conversion of Edge Impulse {coco_set_name} set",
+                "url": "",
+                "version": "1.0",
+                "year": 2026, # Using the year from the conversation context
+                "contributor": "Edge Impulse to COCO Converter",
+                "date_created": "" # Can be populated if needed, e.g., with datetime.now().isoformat()
+            },
+            "licenses": [
+                {
+                    "id": 1,
+                    "name": "Unspecified",
+                    "url": ""
+                }
+            ],
+            "categories": [],
+            "images": [],
+            "annotations": []
+        }
+
+        # Process categories for this specific set
+        unique_categories = {}
+        category_id_counter = 1
+        annotation_id_counter = 1
+
+        for file_entry in set_files:
+            label_name = file_entry.get("label", {}).get("label")
+            if label_name and label_name not in unique_categories:
+                unique_categories[label_name] = category_id_counter
+                coco_dataset["categories"].append({
+                    "id": category_id_counter,
+                    "name": label_name,
+                    "supercategory": "object" # Default supercategory
+                })
+                category_id_counter += 1
+
+        # Process images and annotations for this set
+        total_files = len(set_files)
+        file_iterator = tqdm(set_files, desc=f"Processing {coco_set_name} Images & Annotations") if tqdm else set_files
+
+        image_id_counter = 1
+        for file_entry in file_iterator:
+            # --- Process Image ---
+            # The path in the JSON might include the 'training/' or 'testing/' prefix.
+            # We need to construct the source path from the determined source_images_dir
+            # and then strip the prefix for the COCO JSON filename.
+            ei_image_path_str = file_entry.get("path").strip()
+            ei_image_path = Path(ei_image_path_str)
+            
+            # Determine the relative path from the source_images_dir
+            # Example: ei_image_path = "training/img.jpg", source_images_dir = "/path/to/project/training"
+            # relative_path = "img.jpg"
+            relative_image_path = ei_image_path.relative_to(ei_category_key) # Remove 'training/' or 'testing/'
+            source_image_path = source_images_dir / relative_image_path
+
+            if not source_image_path.exists():
+                msg = f"Warning: Image file '{source_image_path}' not found for {coco_set_name} set, skipping."
+                if tqdm:
+                    tqdm.write(msg)
+                else:
+                    print(msg)
+                continue
+
+            # Copy image to the output directory, preserving any subdirectories within the set's dir
+            destination_image_path = output_images_dir / relative_image_path
+            destination_image_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_image_path, destination_image_path)
+
+            # Add image info to COCO dataset (dimensions will be updated later if PIL is used)
+            # The filename stored in COCO JSON should be the relative path from its own images folder
+            image_filename_for_json = str(relative_image_path.as_posix()) # Use forward slashes for consistency
+            
+            image_info = {
+                "id": image_id_counter,
+                "file_name": image_filename_for_json,
+                "width": -1, # Placeholder
+                "height": -1, # Placeholder
+                "license": 1, # Assuming license id 1
+                "flickr_url": "", # Not provided
+                "coco_url": "", # Not provided
+                "date_captured": "" # Not provided
+            }
+            coco_dataset["images"].append(image_info)
+
+            # --- Process Annotations for this Image ---
+            for bbox in file_entry.get("boundingBoxes", []):
+                label_name = bbox.get("label")
+                x_min = float(bbox.get("x"))
+                y_min = float(bbox.get("y"))
+                width = float(bbox.get("width"))
+                height = float(bbox.get("height"))
+
+                if label_name in unique_categories:
+                    category_id = unique_categories[label_name]
+                    
+                    # Calculate area
+                    area = width * height
+
+                    # COCO bbox format is [x_min, y_min, width, height]
+                    coco_bbox = [x_min, y_min, width, height]
+
+                    annotation_info = {
+                        "id": annotation_id_counter,
+                        "image_id": image_id_counter,
+                        "category_id": category_id,
+                        "bbox": coco_bbox,
+                        "area": area,
+                        "iscrowd": 0 # Default is not crowd
+                    }
+                    coco_dataset["annotations"].append(annotation_info)
+                    annotation_id_counter += 1
+                else:
+                    msg = f"Warning: Annotation label '{label_name}' in image '{image_filename_for_json}' not found in categories for {coco_set_name}."
+                    if tqdm:
+                        tqdm.write(msg)
+                    else:
+                        print(msg)
+
+            image_id_counter += 1
+
+        # Attempt to get image dimensions using PIL if available
+        try:
+            from PIL import Image
+            desc_dim = f"Reading {coco_set_name} Image Dimensions"
+            dim_iterator = tqdm(coco_dataset["images"], desc=desc_dim) if tqdm else coco_dataset["images"]
+            
+            for img_info in dim_iterator:
+                full_img_path = output_images_dir / img_info["file_name"]
+                if full_img_path.exists():
+                    with Image.open(full_img_path) as img:
+                        width, height = img.size
+                        img_info["width"] = width
+                        img_info["height"] = height
+                else:
+                    msg = f"Error: Could not find copied image {full_img_path} to read dimensions for {coco_set_name}."
+                    if tqdm:
+                        tqdm.write(msg)
+                    else:
+                        print(msg)
+        except ImportError:
+            msg = f"PIL (Pillow) not installed. Image dimensions for {coco_set_name} will remain as -1. Consider installing pillow: pip install Pillow"
+            if tqdm:
+                tqdm.write(msg)
+            else:
+                print(msg)
+
+
+        # Save the COCO formatted JSON for this set
+        output_coco_json_path = output_dir / "coco_annotations.json"
+        with open(output_coco_json_path, 'w') as f:
+            json.dump(coco_dataset, f, indent=2)
+
+        print(f"\nConversion for '{coco_set_name}' ({output_set_name}) complete! COCO dataset saved to: {output_dir}")
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description='Convert Edge Impulse project directory to separate COCO format datasets for train and val.')
+    parser.add_argument('input_dir', type=str, help='Path to the Edge Impulse project directory containing training/testing folders and info.labels.')
+
+    args = parser.parse_args()
+
+    convert_edge_impulse_dir_to_coco(args.input_dir)
+
+```
