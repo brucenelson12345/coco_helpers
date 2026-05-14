@@ -1,115 +1,141 @@
-EDGE IMPULSE TO YOLO/ONNX PIPELINE
+YOLO Object Detection Pipeline: Edge Impulse to Deployment
+This repository contains a complete pipeline of scripts designed to take a dataset from Edge Impulse, convert it into COCO and YOLO formats, split it, train a YOLO model, evaluate it, and export it for deployment.
 
-This repository contains a complete pipeline to convert an Edge Impulse object detection dataset into COCO and YOLO formats, train a YOLO model, export it to ONNX, and run inference & validation.
+Prerequisites
+Before running any scripts, you need to set up a Python 3.11 virtual environment on your Linux machine and install the necessary dependencies.
 
-PREREQUISITES
-Ensure you have the required Python libraries installed:
+Bash
+# Update package list and install Python 3.11 and venv (if not already installed)
+sudo apt update
+sudo apt install python3.11 python3.11-venv
+
+# Create a virtual environment named 'venv'
+python3.11 -m venv venv
+
+# Activate the virtual environment
+source venv/bin/activate
+
+# Install the required dependencies
 pip install -r requirements.txt
-
-
-DATA PREPARATION & CONVERSION
+Pipeline Scripts Overview
 1. edge_to_coco.py
-Description: Converts a raw Edge Impulse project directory into standard COCO format datasets for training and validation. It reads the info.labels file, extracts bounding boxes, and copies the images into train and val folders while generating annotations.json files.
-Required Arguments:
-  - input_dir: Path to the Edge Impulse project directory (must contain training/testing folders and info.labels).
-Example Usage:
-  python edge_to_coco.py ./path/to/edge_impulse_export
+Description: Converts an Edge Impulse project directory (containing info.labels and training/testing subdirectories) into separate COCO-formatted datasets (train and val).
 
+Arguments:
+
+input_dir (Positional): Path to the Edge Impulse project directory.
+
+Example Usage:
+
+Bash
+python edge_to_coco.py ./my_edge_impulse_project
 2. annotations_splitter.py
-Description: Splits a single COCO dataset directory into train, val, and test subsets based on a defined ratio, automatically copying images and creating new JSON annotations for each split.
-Required Arguments:
-  - --config or -c: Path to the YAML configuration file.
-Example YAML (split.yaml):
-  image_dir: ./coco_dataset/images
-  annotations_file: ./coco_dataset/annotations.json
-  output_dir: ./split_dataset
-  train_ratio: 0.7
-  val_ratio: 0.2
-  test_ratio: 0.1
-  seed: 42
-Example Usage:
-  python annotations_splitter.py -c split.yaml
+Description: Splits a single COCO dataset into train, val, and test subsets based on configurable ratios defined in a YAML file. This is useful if your original dataset wasn't fully split.
 
+Arguments:
+
+-c, --config (Required): Path to the YAML configuration file.
+
+Config File (splitter_train-val-test.yml):
+
+YAML
+image_dir: ./path_to_images_directory
+annotations_file: ./path_to_annotations.json
+output_dir: ./path_to_output_directory
+
+# Optional
+train_ratio: 0.7
+val_ratio: 0.2
+test_ratio: 0.1
+seed: 42
+Example Usage:
+
+Bash
+python annotations_splitter.py -c splitter_train-val-test.yml
 3. coco_to_yolo.py
-Description: Converts a standard COCO dataset (containing train, val, test subsets with annotations.json) into the YOLO format. It generates a labels/ directory for each subset containing .txt files with normalized bounding box coordinates.
-Required Arguments:
-  - dataset_dir: Path to the root dataset directory containing train/, val/, and test/ folders.
-Example Usage:
-  python coco_to_yolo.py ./split_dataset
+Description: Converts annotations from a split COCO dataset (train, val, test subsets) into the YOLO .txt format. It calculates normalized bounding box coordinates and creates labels directories corresponding to the images directories.
 
+Arguments:
 
-TRAINING & EXPORTING
-4. trainer.py
-Description: Trains a YOLO model using a YOLO-formatted dataset. It automatically generates a data.yaml file by inferring the class names and counts directly from the COCO annotations.json file located in the train/ directory.
-Required Arguments:
-  - --config or -c: Path to the YAML configuration file.
-Example YAML (train.yaml):
-  dataset_path: ./split_dataset
-  weights: yolov8n.pt
-  name: my_custom_model
-  epochs: 50
-  imgsz: 640
-  batch: 16
-  workers: 8
-  devices: [0]
+dataset_dir (Positional): Path to the dataset root directory containing the train/, val/, and test/ folders.
+
 Example Usage:
-  python trainer.py -c train.yaml
+
+Bash
+python coco_to_yolo.py ./my_split_dataset
+4. YOLO Training Configurations (trainer.yaml)
+Description: These files define the settings for training the YOLO model. While the training script itself (e.g., trainer.py or the ultralytics CLI) executes the loop, these configurations dictate the dataset paths, hyperparameters, and target classes.
+
+trainer.yaml (Model & Training Parameters):
+
+YAML
+dataset_path: ./Path_to_dataset
+weights: ./Path_to_YOLO_pretrained_model
+name: "My_Trained_Model"
+epochs: 100
+rect: True
+imgsz: 640
+batch: 16
+workers: 16
+pretrained: False
+trainer_s.yaml (Dataset Structure):
+
+Bash
+# Assuming a standard generic YOLO training script
+python trainer.py -c trainer.yaml
 
 5. export_onnx.py
-Description: Exports a trained YOLO .pt model to ONNX format. It includes a critical step that uses onnxruntime tools to fix the dynamic input shapes to a static resolution, which is highly beneficial for edge deployment.
-Required Arguments:
-  - --input or -i: Path to the input YOLO .pt model.
-  - --resolution or -r: Target fixed resolution as Height Width (e.g., 480 640).
-  - --output or -o: Path to the output .onnx file.
+Description: Exports a trained PyTorch YOLO model (.pt) to an ONNX graph (.onnx). It automatically locks dynamic input shapes to a fixed resolution using ONNX runtime tools for maximum compatibility with edge devices.
+
+Arguments:
+
+-i, --input (Required): Path to the input YOLO .pt model.
+
+-r, --resolution (Required): Image resolution as two integers Height Width (e.g., 480 640).
+
+-o, --output (Required): Path to the output .onnx file.
+
 Example Usage:
-  python export_onnx.py -i runs/train/my_custom_model/weights/best.pt -r 640 640 -o best_fixed.onnx
 
+Bash
+python export_onnx.py -i runs/train/weights/best.pt -r 480 640 -o model_fixed.onn
 
-INFERENCE & VISUALIZATION
-6. inference.py
-Description: Runs YOLO inference on a single image and visually overlays the bounding boxes, class labels, and confidence scores directly onto the image.
-Required Arguments:
-  - --model or -m: Path to the YOLO model (.pt).
-  - --input or -i: Path to the input image file.
-  - --output or -o: Path to save the annotated output image.
+OPTIONAL
+ground_truth.py
+Description: Validates your dataset by drawing semi-transparent bounding boxes and category-specific labels onto the raw images using the COCO annotations. This acts as a visual sanity check before training.
+
+Arguments:
+
+-c, --config (Required): Path to the YAML configuration file.
+
+Config File (groundtruth_coco.yml):
+
+YAML
+image_dir: ./path_to_images_directory
+annotation_file: ./path_to_annotations.json
+output_dir: ./path_to_output_directory
+
+# Optional
+draw_labels: true
+thickness: 2
+font_scale: 0.6
+alpha: 0.3
 Example Usage:
-  python inference.py -m best.pt -i test_image.jpg -o result.jpg
 
-7. ground_truth.py
-Description: A visualization tool that parses a COCO annotations.json file and draws the ground truth bounding boxes directly on the corresponding images. Useful for verifying dataset integrity before training.
-Required Arguments:
-  - --config or -c: Path to the YAML configuration file.
-Example YAML (groundtruth_coco.yaml):
-  image_dir: ./split_dataset/train/images
-  annotation_file: ./split_dataset/train/annotations.json
-  output_dir: ./ground_truth_viz
-  draw_labels: true
-  thickness: 2
-  font_scale: 0.6
-  alpha: 0.3
+Bash
+python ground_truth.py -c groundtruth_coco.yml
+inference.py
+Description: Runs inference on single images using a trained YOLO .pt model. It visually plots the detected bounding boxes, confidence scores, and class labels onto the image and saves the result.
+
+Arguments:
+
+-m, --model (Required): Path to the trained YOLO model (.pt).
+
+-i, --input (Required): Path to the input image file.
+
+-o, --output (Required): Path to save the resulting annotated image.
+
 Example Usage:
-  python ground_truth.py -c groundtruth_coco.yaml
 
-
-EVALUATION & VALIDATION
-8. inference_evaluate.py
-Description: Runs bulk inference over a directory of images, saves visually annotated versions of the results, and calculates overall and per-class mAP by comparing the YOLO outputs against a COCO annotations.json file using the pycocotools API.
-Required Arguments:
-  - config: Path to the YAML configuration file. (Positional argument)
-Example YAML (eval.yaml):
-  weights: best.pt
-  device: cuda:0
-  data_dir: ./split_dataset/val
-  output_dir: ./evaluation_results
-  conf_threshold: 0.25
-Example Usage:
-  python inference_evaluate.py eval.yaml
-
-9. validator.py
-Description: Runs YOLO validation on a test/val set and automatically groups the resulting mAP scores based on class name prefixes. This is particularly useful if your dataset has sub-variants of a primary object class (e.g., car_red, car_blue grouped under car).
-Required Arguments:
-  - --model: Path to the YOLO model file (.pt).
-Optional Arguments:
-  - --output-csv: Path to save the grouped metrics CSV (Defaults to grouped_map_results.csv).
-Example Usage:
-  python validator.py --model best.pt --output-csv final_metrics.csv
+Bash
+python inference.py -m best.pt -i sample_image.jpg -o inference_result.jpg
