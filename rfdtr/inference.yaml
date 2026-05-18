@@ -1,0 +1,7 @@
+# inference_config.yaml
+model_path: "./rfdetr_output/weights/best.pth" # Path to your trained .pth file
+task: "segmentation"                           # Options: detection, segmentation
+model_size: "small"
+image_path: "./test_drone_view.jpg"            # The image you want to test
+confidence: 0.25                               # Probability threshold
+output_path: "./inference_result.jpg"          # Where to save the visualized result

@@ -1,0 +1,9 @@
+dataset_dir: "./drone_dataset"
+task: "detection"  # or "segmentation"
+model_size: "small"
+weights: "./rfdetr_small.pth"
+epochs: 50
+batch_size: 4
+grad_accum_steps: 4
+resolution: 640
+output_dir: "./runs/exp1"
