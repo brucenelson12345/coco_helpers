@@ -1,0 +1,56 @@
+    def batch_nms_for_segmentation(self):
+        """Prep segmentation output for analysis, catching masks alongside boxes."""
+        box_tensors_map, score_tensors_map, label_tensors_map, mask_tensors_map = {}, {}, {}, {}
+        
+        for i in range(len(self.output_tensors)):
+            tensor_name = self.output_tensors[i][NAME]
+            shape = self.output_tensors[i][SHAPE]
+            tensor_data = self.vectors[tensor_name]
+
+            # 1. Mask Tensor (Usually 4D or explicitly named)
+            if "mask" in tensor_name or (shape and len(shape) >= 4):
+                mask_tensors_map = tensor_data.copy()
+                
+            # 2. Box Tensor (Last dimension is 4)
+            elif "box" in tensor_name or (shape and shape[-1] == 4):
+                box_tensors_map = tensor_data.copy()
+                
+            # 3. Classification / Score Tensor
+            else:
+                # If the last dimension is > 1 (e.g., [B, N, 80]), it's a combined classification tensor
+                if shape and shape[-1] > 1:
+                    for key, val in tensor_data.items():
+                        # Extract the highest probability as the score, and its index as the label
+                        score_tensors_map[key] = np.max(val, axis=-1)
+                        label_tensors_map[key] = np.argmax(val, axis=-1)
+                else:
+                    # It's a separated 1D/2D tensor (e.g., [B, N] or [B, N, 1])
+                    parsed_data = {k: np.squeeze(v, axis=-1) if len(v.shape) > 2 else v for k, v in tensor_data.items()}
+                    if "label" in tensor_name or "class" in tensor_name:
+                        label_tensors_map = parsed_data
+                    else:
+                        score_tensors_map = parsed_data
+
+        # Fallback check to prevent ambiguous KeyErrors
+        if not score_tensors_map:
+            raise RuntimeError("Analyzer could not identify the score/classification tensor from the model outputs.")
+
+        for key in box_tensors_map.keys():
+            boxes_out, scores_out, labels_out, masks_out = batched_nms(
+                self.nms_iou_threshold,
+                self.confidence_min,
+                self.data_loader.width,
+                self.data_loader.height,
+                box_tensors_map[key].copy(),
+                score_tensors_map[key].copy(),
+                self.box_format,
+                label_tensors_map[key].round().copy(),
+                mask_tensors_map[key].copy()
+            )
+            
+            box_tensors_map[key] = boxes_out
+            score_tensors_map[key] = scores_out
+            label_tensors_map[key] = labels_out
+            mask_tensors_map[key] = masks_out
+            
+        return box_tensors_map, score_tensors_map, label_tensors_map, mask_tensors_map
