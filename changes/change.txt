@@ -1,0 +1,71 @@
+import onnx
+import onnx_graphsurgeon as gs
+import numpy as np
+import argparse
+
+def replace_einsum(onnx_path, output_path):
+    graph = gs.import_onnx(onnx.load(onnx_path))
+    count = 0
+    
+    for node in graph.nodes:
+        if node.op == "Einsum":
+            eq = node.attrs.get("equation", b"").decode("utf-8")
+            if eq == "bchw,bnc->bnhw":
+                print(f"Patching Einsum node: {node.name}")
+                # X: [B, C, H, W], Y: [B, N, C]
+                X, Y = node.inputs[0], node.inputs[1]
+                out_var = node.outputs[0]
+
+                # 1. Reshape X to [B, C, H*W]
+                reshape1_shape = gs.Constant(name=f"{node.name}_reshape1_shape", values=np.array([0, 0, -1], dtype=np.int64))
+                x_reshaped = gs.Variable(name=f"{node.name}_x_reshaped")
+                reshape1 = gs.Node(op="Reshape", inputs=[X, reshape1_shape], outputs=[x_reshaped])
+                graph.nodes.append(reshape1)
+
+                # 2. MatMul(Y, X_reshaped) -> [B, N, H*W]
+                matmul_out = gs.Variable(name=f"{node.name}_matmul_out")
+                matmul = gs.Node(op="MatMul", inputs=[Y, x_reshaped], outputs=[matmul_out])
+                graph.nodes.append(matmul)
+
+                # 3. Dynamically extract [H, W] from the original X shape
+                shape_x = gs.Variable(name=f"{node.name}_shape_x")
+                graph.nodes.append(gs.Node(op="Shape", inputs=[X], outputs=[shape_x]))
+                
+                starts_hw = gs.Constant(name=f"{node.name}_starts_hw", values=np.array([2], dtype=np.int64))
+                ends_hw = gs.Constant(name=f"{node.name}_ends_hw", values=np.array([4], dtype=np.int64))
+                axes = gs.Constant(name=f"{node.name}_axes", values=np.array([0], dtype=np.int64))
+                hw = gs.Variable(name=f"{node.name}_hw")
+                graph.nodes.append(gs.Node(op="Slice", inputs=[shape_x, starts_hw, ends_hw, axes], outputs=[hw]))
+
+                # 4. Dynamically extract [B, N] from the MatMul output
+                shape_matmul = gs.Variable(name=f"{node.name}_shape_matmul")
+                graph.nodes.append(gs.Node(op="Shape", inputs=[matmul_out], outputs=[shape_matmul]))
+                
+                starts_bn = gs.Constant(name=f"{node.name}_starts_bn", values=np.array([0], dtype=np.int64))
+                ends_bn = gs.Constant(name=f"{node.name}_ends_bn", values=np.array([2], dtype=np.int64))
+                bn = gs.Variable(name=f"{node.name}_bn")
+                graph.nodes.append(gs.Node(op="Slice", inputs=[shape_matmul, starts_bn, ends_bn, axes], outputs=[bn]))
+
+                # 5. Concat [B, N] and [H, W] to formulate the target [B, N, H, W]
+                final_shape = gs.Variable(name=f"{node.name}_final_shape")
+                graph.nodes.append(gs.Node(op="Concat", attrs={"axis": 0}, inputs=[bn, hw], outputs=[final_shape]))
+
+                # 6. Final Reshape back to spatial dimensions
+                graph.nodes.append(gs.Node(op="Reshape", inputs=[matmul_out, final_shape], outputs=[out_var]))
+                
+                node.outputs.clear() # Disconnect original Einsum
+                count += 1
+
+    if count > 0:
+        graph.cleanup().toposort()
+        onnx.save(gs.export_onnx(graph), output_path)
+        print(f"Successfully patched {count} node(s). Saved to {output_path}")
+    else:
+        print("No matching Einsum nodes found.")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", required=True, help="Input ONNX file")
+    parser.add_argument("--output", required=True, help="Output ONNX file")
+    args = parser.parse_args()
+    replace_einsum(args.input, args.output)
